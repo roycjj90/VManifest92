@@ -21,6 +21,11 @@ const app = initializeApp(firebaseConfig)
 // key so the app runs unchanged until the key is set; enforcement is a separate
 // console toggle done AFTER tokens are confirmed healthy in the App Check tab.
 const RECAPTCHA_SITE_KEY = import.meta.env.VITE_RECAPTCHA_SITE_KEY
+// Whether this build is even trying to attach App Check tokens. Read by the login
+// screen: once App Check is ENFORCED in the console, a build without a site key is
+// refused by Firestore with a bare permission-denied, which is indistinguishable
+// from a rules problem unless something says so.
+export const appCheckOn = !!RECAPTCHA_SITE_KEY
 if (RECAPTCHA_SITE_KEY) {
   // For local dev / automated testing against an ENFORCED project, set a debug
   // token (App Check console → Manage debug tokens). Never set this in prod.

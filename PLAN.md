@@ -323,9 +323,24 @@ because it is one company. 5 companies need many.
    authIndex entries, 20 platoons across 5 companies, 15 sections, and **5 roster
    documents of 100 people at ~14 KB each** — 1.4% of the 1 MB limit. An app open
    with all 500 in place still costs **39 reads**.
-4. **App Check last:** register reCAPTCHA v3, set `VITE_RECAPTCHA_SITE_KEY`,
-   confirm tokens are healthy in the console for a day, *then* enforce.
-   `vercel.json`'s CSP already allows the Google domains — carries over as-is.
+4. **App Check last.** Code side is ready and needs no changes:
+   - `src/firebase.js` initialises App Check **only if** `VITE_RECAPTCHA_SITE_KEY` is
+     set, and never lets a failed init break app boot.
+   - `vercel.json`'s CSP checked and confirmed: `script-src` and `frame-src` allow
+     `www.google.com` / `www.gstatic.com`, `connect-src` allows `*.googleapis.com`.
+   - The login screen's diagnostic line now reports **App Check: on/off**, and when a
+     read fails with `permission-denied` in a build that is NOT sending tokens it says
+     so in words. That is the one App Check failure nobody guesses right unaided:
+     enforcing in the console while the deployed build has no site key looks exactly
+     like a rules mistake, and the fix is somewhere else entirely.
+
+   Order on the day: register reCAPTCHA v3 → set the key in Vercel → **redeploy** →
+   confirm the login screen says `App Check: on` and tokens appear in the console →
+   leave it a day → **then** enforce.
+
+   Note: once enforced, Firestore refuses plain REST calls that carry only an API key.
+   That is the point, but it also ends the console-free database checks used
+   throughout this build.
 5. ~~Remove the dev quick-login buttons before real use.~~ **Roy's call: the buttons
    STAY, including after App Check.** `deviceLogins` `allow delete` therefore stays
    open to any signed-in user, because that is what lets them clear a device lock.

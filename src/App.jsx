@@ -3,7 +3,7 @@ import { createPortal, flushSync } from 'react-dom'
 import {
   doc, getDoc, setDoc, updateDoc, deleteField, addDoc, deleteDoc, collection, onSnapshot, getDocs, query, where, writeBatch, Bytes, arrayUnion, arrayRemove,
 } from 'firebase/firestore'
-import { db, auth } from './firebase.js'
+import { db, auth, appCheckOn } from './firebase.js'
 import { SteeringWheel, UsersGroup, Run, RunPlus, UserCog, UsersCog, DocOnDoc } from './tabler-icons.jsx'
 import { RankInsignia, rankKey, rankLabel } from './rank-icons.jsx'
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updatePassword, updateEmail, signOut, onAuthStateChanged, reauthenticateWithCredential, EmailAuthProvider } from 'firebase/auth'
@@ -2250,7 +2250,15 @@ export default function App() {
         // The Firebase error CODE is the whole diagnosis — permission-denied means
         // rules, unavailable means it never got there — and dropping it left the
         // screen saying "could not connect" for both.
-        setSeedError(`${(e && e.code) || 'error'}: ${(e && e.message) || 'Could not connect to Firebase.'}`)
+        //
+        // App Check gets named explicitly. Once it is ENFORCED in the console, a
+        // build that is not sending tokens is refused with a bare permission-denied,
+        // which reads exactly like a rules mistake — and the fix is somewhere else
+        // entirely. This is the one failure nobody guesses right unaided.
+        const code = (e && e.code) || 'error'
+        const appCheckLikely = !appCheckOn && (code === 'permission-denied' || code === 'unauthenticated')
+        setSeedError(`${code}: ${(e && e.message) || 'Could not connect to Firebase.'}`
+          + (appCheckLikely ? ' — if App Check is enforced, this build has no VITE_RECAPTCHA_SITE_KEY set, so Firebase is rejecting it.' : ''))
       })
       .finally(() => {
         clearTimeout(timeout)
@@ -4693,6 +4701,7 @@ function LoginScreen({ onLogin, seedError, theme, setTheme, devLogin }) {
                 in full. Only ever on screen when something is already wrong. */}
             <p style={{ margin: '8px 0 0', fontSize: 12, opacity: 0.85, wordBreak: 'break-all' }}>
               Project: {import.meta.env.VITE_FIREBASE_PROJECT_ID || 'MISSING'}
+              {' · '}App Check: {import.meta.env.VITE_RECAPTCHA_SITE_KEY ? 'on' : 'off'}
               {' · '}Key: {import.meta.env.VITE_FIREBASE_API_KEY ? 'set' : 'MISSING'}
               {' · '}Auth domain: {import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'MISSING'}
               {' · '}App ID: {import.meta.env.VITE_FIREBASE_APP_ID ? 'set' : 'MISSING'}
