@@ -302,8 +302,27 @@ because it is one company. 5 companies need many.
    `admin` (full access) and `user` (member), both password `123` — one per permission
    level, so the two dev quick-login buttons work on a fresh database. Phase 6 adds the
    5 companies here and removes the test accounts along with the buttons.
-3. Bulk import the 500 — reuse the approach in `~/.claude/plans/bulk-account-import.md`.
-   Do not type 500 people by hand.
+3. **Done — as a card in the app** (`Admin → Import Personnel`), not a script, so it
+   runs from a phone with no toolchain. Paste one person per line:
+
+       Company, Platoon, Section, Rank, Name, Login ID
+
+   Tabs OR commas, because a paste straight out of Sheets or Excel is tab-separated.
+   A header row is recognised and skipped. Companies, platoons and sections named in
+   the paste are **created if they don't exist** — otherwise setting up 20 platoons by
+   hand comes first, which is the afternoon this is meant to avoid.
+
+   **Check** before **Import**: nothing is written until the list has been looked at,
+   and a list with any bad line cannot be imported at all. It reports every problem
+   line, not just the first — duplicate login IDs inside the paste, IDs that already
+   exist, missing names, wrong column counts.
+
+   Everyone lands on password `FMC` with `mustChangePassword`.
+
+   Verified end to end with a real 500-row tab-separated paste: 500 accounts, 500
+   authIndex entries, 20 platoons across 5 companies, 15 sections, and **5 roster
+   documents of 100 people at ~14 KB each** — 1.4% of the 1 MB limit. An app open
+   with all 500 in place still costs **39 reads**.
 4. **App Check last:** register reCAPTCHA v3, set `VITE_RECAPTCHA_SITE_KEY`,
    confirm tokens are healthy in the console for a day, *then* enforce.
    `vercel.json`'s CSP already allows the Google domains — carries over as-is.

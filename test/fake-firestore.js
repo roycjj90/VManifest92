@@ -31,10 +31,14 @@ export const Bytes = { fromUint8Array: (u) => ({ __bytes: u }) }
 
 export const getFirestore = () => ({ __fake: true })
 export const collection = (_db, ...p) => ({ type: 'coll', path: p.join('/') })
-export const doc = (a, ...p) => {
-  if (a && a.type === 'coll') return { type: 'doc', path: `${a.path}/${p[0] || rid()}` }
-  return { type: 'doc', path: p.join('/') }
-}
+// A real DocumentReference exposes `.id`, and callers use it to wire documents
+// together BEFORE committing (an account's id going into a roster row, a platoon's
+// into the accounts that belong to it). Leaving it off made every such caller
+// silently key on `undefined` — which looks exactly like an app bug and is not one.
+const docRef = (path) => ({ type: 'doc', path, id: path.split('/').pop() })
+export const doc = (a, ...p) => (
+  a && a.type === 'coll' ? docRef(`${a.path}/${p[0] || rid()}`) : docRef(p.join('/'))
+)
 const rid = () => 'id_' + Math.random().toString(36).slice(2, 12)
 
 const snapOf = (path) => {

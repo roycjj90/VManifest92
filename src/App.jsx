@@ -2058,7 +2058,10 @@ export default function App() {
   // why the split is drawn HERE rather than around `activeGroupId`, whose every change
   // re-points the day's attendance listener.
   const [groupTabGroupId, setGroupTabGroupId] = useState('')
-  const [groupTabCompanyId, setGroupTabCompanyId] = useState('')
+  // null, not '' — '' is the Unfiled tab's OWN id, so an empty initial value counted
+  // as a deliberate choice of Unfiled and the tab opened on the leftover platoon
+  // nobody has filed instead of on A Coy.
+  const [groupTabCompanyId, setGroupTabCompanyId] = useState(null)
   // Share and Scan QR live in the nav bar, above the platoon selector, so they stay
   // put while the roll call scrolls. That is why their state sits up here rather than
   // in TodayView: the buttons are outside it now, and the QR sheet they open is shared
@@ -2521,6 +2524,133 @@ export default function App() {
       const snap = await getDoc(doc(db, 'accounts', id))
       if (snap.exists()) setFullAccounts((prev) => ({ ...prev, [id]: { id: snap.id, ...snap.data() } }))
     } catch (e) {}
+  }
+
+  // ---- Bulk import ---------------------------------------------------------
+  // Typing 500 people into a form is not a thing anyone is going to do, so the roster
+  // arrives as a paste from a spreadsheet. Columns, in order:
+  //
+  //   Company, Platoon, Section, Rank, Name, Login ID
+  //
+  // Tabs OR commas, because a paste straight out of Sheets or Excel is tab-separated
+  // and asking a beginner to convert it is how an import turns into an afternoon.
+  //
+  // Companies, platoons and sections named in the paste are CREATED if they do not
+  // exist — the alternative is setting up twenty platoons by hand first, which is the
+  // same afternoon in a different order.
+  function parseImport(text) {
+    const rows = []
+    const errors = []
+    const seen = new Set()
+    const existing = new Set(accounts.map((a) => (a.username || '').toLowerCase()))
+    text.split(/\r?\n/).forEach((raw, i) => {
+      const line = raw.trim()
+      if (!line) return
+      const cells = (line.includes('\t') ? line.split('\t') : line.split(',')).map((c) => c.trim())
+      // A header row is common in a spreadsheet paste and is not an error worth
+      // stopping for — recognise it and move on.
+      if (i === 0 && /company/i.test(cells[0] || '') && /platoon/i.test(cells[1] || '')) return
+      const [company, platoon, section, rank, name, login] = cells
+      const where = `Line ${i + 1}`
+      if (cells.length < 6) { errors.push(`${where}: needs 6 columns, found ${cells.length}.`); return }
+      if (!name) { errors.push(`${where}: no name.`); return }
+      if (!login) { errors.push(`${where}: no login ID.`); return }
+      const id = login.toLowerCase()
+      if (seen.has(id)) { errors.push(`${where}: login ID ${login} appears twice in this paste.`); return }
+      if (existing.has(id)) { errors.push(`${where}: login ID ${login} already exists.`); return }
+      seen.add(id)
+      rows.push({ company, platoon, section, rank, name: name.toUpperCase(), login: id })
+    })
+    return { rows, errors }
+  }
+
+  // One pass, batched. Per person that is two writes (the account and its authIndex
+  // entry); the rosters are ONE write per company however many people it gained,
+  // which is the whole reason they are shaped that way.
+  async function runImport(rows) {
+    try {
+      const hash = await hashPassword(DEFAULT_INITIAL_PASSWORD)
+      const batch = chunkedBatch()
+
+      // Companies and platoons first — a person needs somewhere to be filed, and the
+      // ids have to exist before the accounts that reference them are written.
+      const coyId = {}
+      companies.forEach((c) => { coyId[c.name.toLowerCase()] = c.id })
+      const newCoys = [...new Set(rows.map((r) => r.company).filter(Boolean))]
+        .filter((n) => !coyId[n.toLowerCase()])
+      newCoys.forEach((n, i) => {
+        const ref = doc(collection(db, 'companies'))
+        coyId[n.toLowerCase()] = ref.id
+        batch.set(ref, { name: n, order: companies.length + i })
+      })
+
+      // Platoon names repeat across companies ("1 Platoon" exists five times), so a
+      // platoon is identified by company AND name, never by name alone.
+      const pltKey = (c, p) => `${(c || '').toLowerCase()}|${(p || '').toLowerCase()}`
+      const pltId = {}
+      const pltSections = {}
+      groups.forEach((g) => {
+        const cname = (companies.find((c) => c.id === g.companyId) || {}).name || ''
+        pltId[pltKey(cname, g.name)] = g.id
+        pltSections[g.id] = [...(g.miniGroups || [])]
+      })
+      const newPlts = []
+      rows.forEach((r) => {
+        const k = pltKey(r.company, r.platoon)
+        if (!r.platoon || pltId[k]) return
+        const ref = doc(collection(db, 'groups'))
+        pltId[k] = ref.id
+        pltSections[ref.id] = []
+        newPlts.push({ ref, name: r.platoon, companyId: coyId[(r.company || '').toLowerCase()] || '' })
+      })
+
+      // Sections live as an array on the platoon document, so they are collected for
+      // every platoon and written once with it rather than one write per section.
+      const secId = {}
+      rows.forEach((r) => {
+        const gid = pltId[pltKey(r.company, r.platoon)]
+        if (!gid || !r.section) return
+        const list = pltSections[gid]
+        let sec = list.find((m) => (m.name || '').toLowerCase() === r.section.toLowerCase())
+        if (!sec) { sec = { id: genMiniGroupId() + list.length, name: r.section, order: list.length }; list.push(sec) }
+        secId[`${gid}|${r.section.toLowerCase()}`] = sec.id
+      })
+      newPlts.forEach((p, i) => batch.set(p.ref, { name: p.name, companyId: p.companyId, order: groups.length + i, miniGroups: pltSections[p.ref.id] }))
+      groups.forEach((g) => { if ((pltSections[g.id] || []).length !== (g.miniGroups || []).length) batch.set(doc(db, 'groups', g.id), { miniGroups: pltSections[g.id] }, { merge: true }) })
+
+      // The people, and the roster rows they appear in.
+      const rosterAdds = {}
+      const order = {}
+      rows.forEach((r) => {
+        const cid = coyId[(r.company || '').toLowerCase()] || ''
+        const gid = pltId[pltKey(r.company, r.platoon)] || ''
+        const mg = secId[`${gid}|${(r.section || '').toLowerCase()}`] || ''
+        const bucket = `${gid}|${mg}`
+        order[bucket] = (order[bucket] || 0)
+        const memberOrder = order[bucket]++
+        const ref = doc(collection(db, 'accounts'))
+        const acc = {
+          username: r.login, displayName: r.name, nickname: '',
+          groupId: gid, companyId: cid, miniGroupId: mg,
+          password: hash, isAdmin: false, isSuperAdmin: false,
+          authEmailVersion: 0, failedAttempts: 0, lockedUntil: null,
+          mustChangePassword: true, authEmailScheme: AUTH_SCHEME_ACCOUNT,
+          memberOrder, ...(r.rank ? { info: { Rank: r.rank } } : null),
+        }
+        batch.set(ref, acc)
+        batch.set(doc(db, 'authIndex', r.login), { accountId: ref.id, authEmailVersion: 0, password: hash, failedAttempts: 0, lockedUntil: null, authEmailScheme: AUTH_SCHEME_ACCOUNT })
+        const key = cid || ROSTER_UNFILED
+        ;(rosterAdds[key] = rosterAdds[key] || {})[ref.id] = rosterEntryOf({ id: ref.id, ...acc })
+      })
+      // merge:true, so an import ADDS to a company that already has people rather than
+      // replacing them — a second import of one more platoon must not wipe the first.
+      Object.entries(rosterAdds).forEach(([cid, members]) => batch.set(doc(db, 'rosters', cid), { members }, { merge: true }))
+
+      await batch.commit()
+      return { ok: true, message: `Imported ${rows.length} personnel, ${newCoys.length} new companies, ${newPlts.length} new platoons.` }
+    } catch (e) {
+      return { ok: false, message: "Couldn't import. Nothing may have been written — check the list and try again." }
+    }
   }
 
   // Repair. The mirror is written by the app, so a botched import or a write that lost a
@@ -3965,7 +4095,8 @@ export default function App() {
   // this out of a hook, which could not live down here anyway: everything it needs is
   // declared below the login early-return, and a hook behind a conditional return is not
   // a hook React accepts.
-  const companyTab = companyTabs.some((c) => c.id === groupTabCompanyId) ? groupTabCompanyId : ((companyTabs[0] || {}).id || '')
+  const companyTab = (groupTabCompanyId !== null && companyTabs.some((c) => c.id === groupTabCompanyId))
+    ? groupTabCompanyId : ((companyTabs[0] || {}).id || '')
   const groupTabGroups = companyTabs.length
     ? groups.filter((g) => (companies.some((c) => c.id === (g.companyId || '')) ? g.companyId : '') === companyTab)
     : groups
@@ -4376,6 +4507,7 @@ export default function App() {
             accountFields={accountFields} addAccountField={addAccountField} removeAccountField={removeAccountField} reorderAccountField={reorderAccountField} setAccountFieldOrder={setAccountFieldOrder} renameAccountField={renameAccountField} setAccountFieldEditable={setAccountFieldEditable} setAccountInfo={setAccountInfo} setAccountRole={setAccountRole}
             adminSubTab={sub} setAdminSubTab={live ? setAdminSubTab : SWIPE_NOOP}
             rebuildRosters={rebuildRosters} loadFullAccount={loadFullAccount}
+            parseImport={parseImport} runImport={runImport}
           />
           )
           return (
@@ -7237,7 +7369,7 @@ function AdminView({
   setGroupInfo,
   groupFields, addGroupField, removeGroupField, reorderGroupField, setGroupFieldOrder, renameGroupField,
   accountFields, addAccountField, removeAccountField, reorderAccountField, setAccountFieldOrder, renameAccountField, setAccountFieldEditable, setAccountInfo, setAccountRole,
-  adminSubTab, setAdminSubTab, rebuildRosters, loadFullAccount,
+  adminSubTab, setAdminSubTab, rebuildRosters, loadFullAccount, parseImport, runImport,
 }) {
   const [openPopup, setOpenPopup] = useState(null)
   // Tells App when Device Lockouts is on screen, which is the only moment their listener
@@ -7343,6 +7475,10 @@ function AdminView({
   // work" is exactly the question the held-back line above it already answers. The tap
   // turns that line red instead.
   const [mvDenied, setMvDenied] = useState(false)
+  const [importText, setImportText] = useState('')
+  const [importPreview, setImportPreview] = useState(null)
+  const [importMsg, setImportMsg] = useState('')
+  const [importBusy, setImportBusy] = useState(false)
   const [rebuildMsg, setRebuildMsg] = useState('')
   const [rebuildBusy, setRebuildBusy] = useState(false)
   const confirmTimer = useRef(null)
@@ -7958,6 +8094,58 @@ function AdminView({
                   sits above: it is a live switch rather than a clean-up, and a mode
                   change that takes one tap does not belong in the same box as two
                   irreversible deletions. */}
+              {/* Getting 500 people in. A paste from a spreadsheet, previewed before
+                  anything is written — an import that half-succeeds on a roster is far
+                  worse than one that refuses. */}
+              <PopupCard grouped title="Import Personnel" icon={UserPlus} subtitle="Add many personnel from a spreadsheet." maxHeight="80vh"
+                open={openPopup === 'import'} onOpen={() => { setImportText(''); setImportMsg(''); setImportPreview(null); setOpenPopup('import') }}
+                onClose={() => setOpenPopup(null)}>
+                <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: '0 0 4px', lineHeight: 1.5 }}>
+                  Paste one person per line, in this order:
+                </p>
+                <p style={{ fontSize: 12, fontWeight: 600, margin: '0 0 8px' }}>Company, Platoon, Section, Rank, Name, Login ID</p>
+                <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 10px', lineHeight: 1.5 }}>
+                  Copying straight out of Excel or Google Sheets works — it pastes as columns.
+                  Companies, platoons and sections you name here are created if they don't exist.
+                  Everyone starts with the password <strong>FMC</strong> and is asked to change it on first login.
+                </p>
+                <textarea value={importText} onChange={(e) => { setImportText(e.target.value); setImportPreview(null); setImportMsg('') }}
+                  placeholder={'A Coy, 1 Platoon, Section 1, CPL, TAN WEI MING, 91234567'}
+                  rows={6} style={{ width: '100%', fontFamily: 'inherit', fontSize: 16, resize: 'vertical' }} />
+                {importPreview && (
+                  <div style={{ margin: '10px 0 0' }}>
+                    <p style={{ fontSize: 13, fontWeight: 600, margin: '0 0 4px' }}>
+                      {importPreview.rows.length} ready{importPreview.errors.length ? `, ${importPreview.errors.length} to fix` : ''}
+                    </p>
+                    {/* Every problem line, not just the first — fixing a spreadsheet one
+                        error per round trip is its own kind of afternoon. Capped so a
+                        badly-formatted paste cannot produce a wall of red. */}
+                    {importPreview.errors.slice(0, 12).map((e, i) => (
+                      <p key={i} style={{ fontSize: 12, color: 'var(--red)', margin: '0 0 2px' }}>{e}</p>
+                    ))}
+                    {importPreview.errors.length > 12 && (
+                      <p style={{ fontSize: 12, color: 'var(--red)', margin: '0 0 2px' }}>…and {importPreview.errors.length - 12} more.</p>
+                    )}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                  <button className="btn-secondary" style={{ flex: 1 }} disabled={!importText.trim() || importBusy}
+                    onClick={() => { setImportPreview(parseImport(importText)); setImportMsg('') }}>Check</button>
+                  {/* Deliberately behind Check: nothing is written until the list has been
+                      looked at, and a list with any bad line cannot be imported at all. */}
+                  <button className="btn-primary" style={{ flex: 1, opacity: (importPreview && importPreview.rows.length && !importPreview.errors.length) ? 1 : 0.4 }}
+                    disabled={!importPreview || !importPreview.rows.length || !!importPreview.errors.length || importBusy}
+                    onClick={async () => {
+                      setImportBusy(true)
+                      const r = await runImport(importPreview.rows)
+                      setImportMsg(r.message)
+                      if (r.ok) { setImportText(''); setImportPreview(null) }
+                      setImportBusy(false)
+                    }}>{importBusy ? 'Importing…' : 'Import'}</button>
+                </div>
+                {importMsg && <p style={{ fontSize: 12, marginTop: 8, color: importMsg.startsWith('Imported') ? 'var(--blue)' : 'var(--red)' }}>{importMsg}</p>}
+              </PopupCard>
+              <div style={{ height: 1, background: 'var(--separator)', margin: '0 16px' }} />
               {/* Repair for the company rosters. They are the only thing any screen
                   reads to draw a list, and they are written by the app — so a botched
                   import or a write that lost a race leaves a list disagreeing with the
