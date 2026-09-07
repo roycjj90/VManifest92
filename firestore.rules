@@ -350,18 +350,25 @@ service cloud.firestore {
     // caller. Forging a lock against a specific person would require guessing
     // their deviceId, which is not feasible.
     //
-    // DELETE is still open — deliberately, and temporarily. Clearing a lock
-    // defeats the entire anti-buddy-check-in control, so it belongs to admins
-    // (clearDeviceLock, Admin tab). But the DEV quick-login buttons clear it as
-    // a regular user so role switching never trips a lockout, and that call is
-    // wrapped in a bare try/catch — tightening delete now would break testing
-    // silently. Swap to `isAdmin()` in the same change that removes the dev
-    // buttons (see the pre-launch checklist in CLAUDE.md).
+    // DELETE is open, and STAYS open — Roy's call, recorded here so it does not
+    // read as an oversight. The dev quick-login buttons clear a lock as a regular
+    // user so role switching never trips a lockout, and those buttons are staying
+    // in the app, including after App Check.
+    //
+    // What that costs, stated plainly: any signed-in user can clear anyone's device
+    // lock, so the one-account-per-device control is advisory rather than enforced.
+    // It is the smaller half of the same decision — the dev buttons themselves let
+    // anyone who opens the app sign in as admin, which App Check does not prevent
+    // because the buttons are inside the app it is vouching for.
+    //
+    // If that is ever revisited, this becomes `isAdmin()` in the same change that
+    // removes the buttons — and test/devlogin.test.mjs is the test that will fail
+    // to tell you the two go together.
     match /deviceLogins/{deviceId} {
       allow get: if signedIn();
       allow list: if isAdmin();
       allow create, update: if signedIn();
-      allow delete: if signedIn();   // -> isAdmin() when the dev buttons go
+      allow delete: if signedIn();   // stays open while the dev buttons stay — see above
     }
   }
 }

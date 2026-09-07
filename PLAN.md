@@ -285,13 +285,19 @@ because it is one company. 5 companies need many.
 - **Keep** the manifest report / export (`buildManifestReport`, `App.jsx:13356`).
   That is the printed sheet, and it is the whole point of the app.
 
-## Phase 6 — Rules, seed, lock down  ⬜
+## Phase 6 — Rules, seed, lock down  🔶 IN PROGRESS
 
-1. Start from `firestore.rules`; delete the blocks for dropped collections, add
-   `companies` + `seats`, add the company-admin level. Three to get right:
-   - `seats/{accountId}` — a person reads their **own** doc only; writes admin-only.
+1. **Done.** `firestore.rules` 628 → 367 lines: blocks for every dropped collection
+   deleted, `companies` added, `seats` and `rosters` re-keyed. No company-admin level
+   (single admin, see Phase 3).
+   - `seats/{accountId}` — a rider reads their **own** doc only; **writes admin-only**.
    - `movements/{id}` — admin read only; riders never reach it.
-   - `rosters/{companyId}` — admin read; battalion sees all, company sees its own.
+   - `rosters/{companyId}` — `get` to the owning member or an admin; `list` admin-only.
+
+   Verified against the **real Firestore rules engine** in the emulator, not by
+   reading: `test/rules.test.mjs` (31 assertions) and `test/devlogin.test.mjs`
+   (7 — the login bootstrap, the first-login account claim, and the dev buttons'
+   device-lock clear). Both pass.
 2. `ensureSeedData()` no longer creates statuses, and seeds **two test accounts** —
    `admin` (full access) and `user` (member), both password `123` — one per permission
    level, so the two dev quick-login buttons work on a fresh database. Phase 6 adds the
@@ -301,7 +307,19 @@ because it is one company. 5 companies need many.
 4. **App Check last:** register reCAPTCHA v3, set `VITE_RECAPTCHA_SITE_KEY`,
    confirm tokens are healthy in the console for a day, *then* enforce.
    `vercel.json`'s CSP already allows the Google domains — carries over as-is.
-5. Remove the dev quick-login buttons before real use.
+5. ~~Remove the dev quick-login buttons before real use.~~ **Roy's call: the buttons
+   STAY, including after App Check.** `deviceLogins` `allow delete` therefore stays
+   open to any signed-in user, because that is what lets them clear a device lock.
+
+   The cost, recorded so it is a decision and not an oversight: **anyone who opens
+   the app can tap Dev: Admin and get full battalion access** — every name, every
+   phone number, every manifest. App Check does not help, because the buttons are
+   inside the app it vouches for. The one-account-per-device lock also becomes
+   advisory rather than enforced.
+
+   Two things would take most of that risk away without losing the convenience:
+   change the seeded `admin` password from `123`, and keep Lockdown Mode on until
+   the app is actually announced. Both are one action each.
 
 ---
 
