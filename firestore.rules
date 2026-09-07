@@ -481,9 +481,17 @@ service cloud.firestore {
     // though — the card write shares a batch with the board write, and a batch is
     // all-or-nothing, so a client deployed against un-published rules would fail
     // every attendance write, not just the mirror.
-    match /attendanceSelf/{accountId} {
+    // A rider's own seats, keyed by manifest id. This is the ONLY thing a non-admin
+    // reads to find their vehicle: movements/ is admin-only and battalion-wide, so a
+    // rider must never reach it, and everything they need is copied onto this document
+    // instead.
+    //
+    // READ is their own document alone. WRITE is admin-only — unlike the attendanceSelf
+    // block this replaces, a rider has no business writing here: nothing they do puts
+    // them on a vehicle, and a writable seat is a rider who can seat himself.
+    match /seats/{accountId} {
       allow read: if isAdmin() || isSelfAccount(accountId);
-      allow write: if isAdmin() || isSelfAccount(accountId);
+      allow write: if isAdmin();
     }
 
     // Supporting documents attached to a status (an MC certificate and the like).
@@ -552,7 +560,7 @@ service cloud.firestore {
     // one morning — not a record that has gone up the chain.
     //
     // Members never read this. Their own vehicle and role are mirrored onto their
-    // attendanceSelf card, which they already listen to, so this collection costs a
+    // seats document, which they already listen to, so this collection costs a
     // member nothing and needs no member-facing scope.
     //
     // Deliberately NOT under settings/{docId} or the attendance block: it is a plan,
@@ -561,7 +569,7 @@ service cloud.firestore {
     //
     // Additive and inert: nothing reads or writes this collection until the client that
     // does is deployed, so this is safe to publish first — and it MUST go first, since
-    // the assignment write shares an atomic batch with the attendanceSelf card write.
+    // the assignment write shares an atomic batch with the seat write.
     match /movements/{docId} {
       allow read: if isAdmin();
       allow write: if isAdmin();

@@ -72,11 +72,6 @@ attendance read** · the dead state they fed.
 
 Tab bar: Manifests (home, always present) · Platoon · Personnel · Admin.
 
-**Known gap, carried into Phase 2c:** `mySeats` is no longer populated — it used to
-come off the `attendanceSelf` listener, which is gone. A rider's seat view will be
-empty until `seats/{accountId}` is built. This is the planned replacement, not a
-regression to undo.
-
 **Left over for a tidy-up pass:** the venue helpers still at the top of `App.jsx`
 (`effectiveVenue`, `companyVenue`, `venueRuns`, `coverageGaps`), their remaining uses
 in `AccountView` / `GroupMembersView`, the `statuses` state (needed until Phase 2a),
@@ -117,16 +112,26 @@ one PULSE 92 rule that carries over unchanged.
 **Tabs after the cut:** Manifests (the old Movement tab, now home, always
 present) · Platoon · Personnel · Admin. Delete the `showMovementTab` gate.
 
-## Phase 2 — Cut the 3 attendance threads  ⬜
+## Phase 2 — Cut the 3 attendance threads  ✅ DONE
 
-- **a) Expected status** — delete the manifest's `statusId` field,
-  `movementDayStatusesFor()` (`App.jsx:6529`), and the side-by-side roll-call
-  comparison in `MovementView`.
-- **b) Status sweep** — delete entirely (`App.jsx:3352` onward): the code that
-  pulls a man off his seat when marked MC. No statuses left to react to.
+- **a) Expected status** — **done.** The manifest's `statusId` field, its writers,
+  `movementDayStatusesFor()` and the whole plan-vs-roll-call comparison in
+  `MovementView` are gone — the two amber counts, the per-vehicle warning triangle and
+  the per-name one. Outfield vs activity now reads off the manifest's own `kind`
+  instead of being inferred from which status it rostered from.
+- **b) Status sweep** — **done.** `syncMovementSeats()` is gone. A man now stays on
+  the vehicle he was put on until an admin takes him off it.
 - **c) Seat delivery** — `attendanceSelf` is gone. New collection
   `seats/{accountId}`, one doc per person, seats keyed by manifest id.
   `mirrorSelfMovement()` (`App.jsx:3144`) becomes `writeSeat()`.
+
+  **Done.** `seats/{accountId}` = `{ seats: { [manifestId]: { …seat } } }`.
+  `writeSeat()` replaces `mirrorSelfMovement()`. A rider listens to one document —
+  their own — and past moves are filtered out on read rather than deleted, so a
+  finished move costs no write. `firestore.rules` gives `seats/{accountId}` read to
+  the owner or an admin and **write to admins only** (a rider who can write his own
+  seat is a rider who can seat himself — the `attendanceSelf` block this replaces
+  allowed it because a member did mark his own attendance).
 
   Rules that keep it cheap:
   - Rider listens to **one** doc — their own. 1 read.

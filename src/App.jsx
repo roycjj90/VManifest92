@@ -1807,7 +1807,6 @@ export default function App() {
   })
   const [accounts, setAccounts] = useState([])
   const [groups, setGroups] = useState([])
-  const [statuses, setStatuses] = useState([])
   const [attendance, setAttendance] = useState({})
   const [attendanceVerifiers, setAttendanceVerifiers] = useState({})
   // Which venue validated each proximity check-in, keyed like attendance itself.
@@ -1815,7 +1814,6 @@ export default function App() {
   // schedule that produced it is edited or pruned.
   const [attendanceVenues, setAttendanceVenues] = useState({})
   // The day's own record of who was on it and where they reported — see dayStamp().
-  const [attendanceStamp, setAttendanceStamp] = useState({})
   // Metadata for the supporting document attached to each person's status, keyed
   // like attendance. Rides on the attendance doc the board already reads, so the
   // attached / outstanding / confirmed marker costs no extra reads. The file bytes
@@ -2042,7 +2040,6 @@ export default function App() {
   // are two different questions.
   const [adminSubTab, setAdminSubTab] = useState('general')
   // Tick-for-a-moment state on the Count tab's Copy Report button — see buildFmcReport.
-  const [copiedReport, setCopiedReport] = useState(false)
   // Which status's company-wide names are open, as a status id. The chips in the All
   // Platoons card open this; the Count tab's own day card has its own single-platoon one.
   const fetchedAttendanceKeys = useRef(new Set())
@@ -2232,67 +2229,20 @@ export default function App() {
       const cache = loadStaticCache()
       if (cache) {
         if (cache.groups) setGroups(cache.groups)
-        if (cache.statuses) setStatuses(cache.statuses)
         if (cache.groupFields) setGroupFields(cache.groupFields)
         if (cache.accountFields) setAccountFields(sortAccountFields(cache.accountFields))
-        if (cache.savedLocations) { setSavedLocations(cache.savedLocations); setLocationsReady(true) }
       } else {
         Promise.all([
           getDocs(collection(db, 'groups')),
-          getDocs(collection(db, 'statuses')),
           getDocs(collection(db, 'groupFields')),
           getDocs(collection(db, 'accountFields')),
-          getDocs(collection(db, 'locations')),
-        ]).then(([gSnap, sSnap, gfSnap, afSnap, lSnap]) => {
+        ]).then(([gSnap, gfSnap, afSnap]) => {
           const g = sort(gSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
-          const s = sort(sSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
           const gf = sort(gfSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
           const af = sortAccountFields(afSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
-          const l = sort(lSnap.docs.map((d) => ({ id: d.id, ...d.data() })))
-          setGroups(g); setStatuses(s); setGroupFields(gf); setAccountFields(af); setSavedLocations(l); setLocationsReady(true)
-          saveStaticCache({ groups: g, statuses: s, groupFields: gf, accountFields: af, savedLocations: l })
+          setGroups(g); setGroupFields(gf); setAccountFields(af)
+          saveStaticCache({ groups: g, groupFields: gf, accountFields: af })
         })
-      }
-      // Real-time listener so venue changes from admin are reflected immediately.
-      // Only the group doc is listened to (cheap: 1 read per user per change).
-      // If the newly assigned location isn't cached yet, fetch just that doc.
-      if (account.groupId) {
-        const fetchedLocIds = new Set()
-        unsubs.push(
-          onSnapshot(doc(db, 'groups', account.groupId), (snap) => {
-            if (!snap.exists()) return
-            const updated = { id: snap.id, ...snap.data() }
-            setGroups((prev) => {
-              const exists = prev.some((g) => g.id === snap.id)
-              return exists ? prev.map((g) => g.id === snap.id ? updated : g) : sort([...prev, updated])
-            })
-            // Every venue the group can send this member to within the outlook
-            // window — the default plus anything scheduled — so the outlook can
-            // print names. One getDoc per venue, once, only when it first appears.
-            const wanted = new Set()
-            if (updated.locationId) wanted.add(updated.locationId)
-            for (let i = 0; i < OUTLOOK_DAYS; i++) {
-              const entry = scheduledVenueEntry(updated, i === 0 ? todayISO() : addDays(todayISO(), i), account.miniGroupId)
-              if (entry && entry.locationId) wanted.add(entry.locationId)
-            }
-            setSavedLocations((prev) => {
-              wanted.forEach((locId) => {
-                if (fetchedLocIds.has(locId) || prev.some((l) => l.id === locId)) return
-                fetchedLocIds.add(locId)
-                getDoc(doc(db, 'locations', locId)).then((lSnap) => {
-                  if (!lSnap.exists()) return
-                  setSavedLocations((p) => {
-                    const next = sort([...p.filter((l) => l.id !== locId), { id: lSnap.id, ...lSnap.data() }])
-                    const cached = loadStaticCache()
-                    if (cached) saveStaticCache({ ...cached, savedLocations: next })
-                    return next
-                  })
-                }).catch(() => {})
-              })
-              return prev
-            })
-          }),
-        )
       }
     }
 
@@ -2367,6 +2317,28 @@ export default function App() {
       // matches what a single-manifest build did and keeps the choice predictable.
       setMovements(Object.fromEntries(MV_KINDS.map((k) => [k, live.find((m) => movementKind(m) === k) || null])))
     })
+  }, [account, dayKey])
+
+  // A rider's own seats. ONE document, their own, and the only thing a non-admin reads
+  // to work out where they are riding — the manifest itself is admin-only and
+  // battalion-wide, so a rider must never reach it. One read to open, one per change.
+  //
+  // Admins skip it: they hold the manifests themselves, and their own seat is already on
+  // the one they are looking at.
+  //
+  // Past moves are dropped on the way in rather than deleted from the document. A seat
+  // whose last day has gone is only ever ONE stale map entry per rider, and clearing it
+  // would cost a write per rider per move — for something nobody sees either way.
+  useEffect(() => {
+    if (!account || account.isAdmin) return
+    return onSnapshot(doc(db, 'seats', account.id), (snap) => {
+      const all = (snap.exists() ? snap.data().seats : null) || {}
+      const today = todayISO()
+      setMySeats(Object.entries(all)
+        .filter(([, v]) => v && (v.until || v.date) >= today)
+        .map(([id, v]) => ({ id, ...v }))
+        .sort((a, b) => (a.date < b.date ? -1 : 1)))
+    }, () => setMySeats([]))
   }, [account, dayKey])
 
   // The standing vehicle fleet, read only while something is actually showing it, and
@@ -2707,16 +2679,28 @@ export default function App() {
   // part of the attendance rules, pastDayOK(), or the freeze.
 
 
-  function mirrorSelfMovement(batch, accountId, mvId, seat) {
-    batch.set(doc(db, 'attendanceSelf', accountId), { mvSeats: { [mvId]: seat || deleteField() }, movement: deleteField() }, { merge: true })
+  // One document per person, holding every seat they hold, keyed by manifest id.
+  //
+  // Keyed by manifest id, not a single field: a man booked on two moves must see both,
+  // and PULSE 92's single-field version silently overwrote the first booking with the
+  // second. That was a real bug and this is the shape that fixes it.
+  //
+  // A rider reads exactly ONE document — their own — and never the manifest, which is
+  // admin-only and battalion-wide. So everything they need has to be written here: the
+  // vehicle, the dates, their role, and the whole crew list with each man's name,
+  // platoon and company. One read per rider per app open, whatever the battalion does.
+  //
+  // Attached men have no login and no seat document at all — writing one would be a
+  // document nobody can ever read. Callers pass `att` on the assignment; skip those.
+  function writeSeat(batch, accountId, mvId, seat) {
+    batch.set(doc(db, 'seats', accountId), { seats: { [mvId]: seat || deleteField() } }, { merge: true })
   }
 
   // `party` is null on an ordinary activity, and that null is what the member's card reads
   // to know it has no wave to name. The card is standalone by design — a member cannot read
   // `movements/` — so everything it shows has to be written onto the seat here.
   function movementSeatCard(mv, veh, role, crew) {
-    const activity = !mv.statusId || mv.statusId === (statuses[0] || {}).id
-    return { date: mv.date, until: mv.until || mv.date, kind: movementKind(mv), name: mv.name || 'OUTFIELD', callsign: veh.callsign || '', plate: veh.plate || '', type: veh.type || '', role, party: activity ? null : (veh.party || 'main'), crew: crew || [] }
+    return { date: mv.date, until: mv.until || mv.date, kind: movementKind(mv), name: mv.name || 'OUTFIELD', callsign: veh.callsign || '', plate: veh.plate || '', type: veh.type || '', role, party: veh.party || null, crew: crew || [] }
   }
 
   // Everyone on a vehicle carries THAT vehicle's crew on their own card, so a member can
@@ -2750,7 +2734,10 @@ export default function App() {
     // section he came from. Left off, his crew list showed an attached man as one of his own
     // while the admin's manifest beside it marked him plainly.
     const crew = rows.map(([id, a]) => ({ id, n: a.n || '', r: a.r || 'pax', g: a.g || '', gn: platoonNameOf(a.g), ...(a.att ? { att: true } : null), ...(a.sec ? { sec: a.sec } : null) }))
-    rows.forEach(([accId, a]) => mirrorSelfMovement(batch, accId, mv.id, movementSeatCard(mv, veh, a.r, crew)))
+    // An attached man never logs in, so a seat document written for him is one nobody
+    // can read. He still rides on everyone else's crew list above — only his own copy
+    // is skipped.
+    rows.forEach(([accId, a]) => { if (!a.att) writeSeat(batch, accId, mv.id, movementSeatCard(mv, veh, a.r, crew)) })
   }
 
   // Every manifest write goes through here so a rejection is REPORTED rather than
@@ -2796,7 +2783,7 @@ export default function App() {
       Object.entries((mv && mv.assign) || {}).forEach(([accId, a]) => {
         if (a.v !== vehicleId) return
         patch[`assign.${accId}`] = deleteField()
-        mirrorSelfMovement(batch, accId, id, null)
+        if (!a.att) writeSeat(batch, accId, id, null)
       })
       batch.update(doc(db, 'movements', id), patch)
       return batch.commit()
@@ -2819,13 +2806,8 @@ export default function App() {
   // the same reason the party does, so changing it has to refresh them all — otherwise a
   // card that still ends yesterday goes blank on a member's phone on day two, on exactly
   // the morning they need it. Bounded by the manifest (vehicles × seats), and writes.
-  // `sourceId` is the roster source the cards should be written AS, for the one caller that
-  // has just changed it: the local `movement` still carries the old one until the listener
-  // catches up, and a seat card built from it would keep a party the manifest no longer has.
-  // Left undefined, the cards keep whatever source the manifest already had.
-  function setMovementRange(id, date, until, sourceId) {
-    const live = movementById(id)
-    const mv = live && (sourceId === undefined ? live : { ...live, statusId: sourceId })
+  function setMovementRange(id, date, until) {
+    const mv = movementById(id)
     return movementWrite(() => {
       const batch = writeBatch(db)
       batch.set(doc(db, 'movements', id), { date, year: parseInt(date.slice(0, 4), 10), until }, { merge: true })
@@ -2852,7 +2834,7 @@ export default function App() {
         if (published) {
           Object.keys(mv.vehicles || {}).forEach((vid) => writeVehicleCards(batch, { ...mv, published: true }, vid, assign))
         } else {
-          Object.keys(assign).forEach((accId) => mirrorSelfMovement(batch, accId, id, null))
+          Object.entries(assign).forEach(([accId, a]) => { if (!a.att) writeSeat(batch, accId, id, null) })
         }
       }
       return batch.commit()
@@ -2863,7 +2845,7 @@ export default function App() {
     const mv = movementById(id)
     return movementWrite(() => {
       const batch = writeBatch(db)
-      Object.keys((mv && mv.assign) || {}).forEach((accId) => mirrorSelfMovement(batch, accId, id, null))
+      Object.entries((mv && mv.assign) || {}).forEach(([accId, a]) => { if (!a.att) writeSeat(batch, accId, id, null) })
       batch.delete(doc(db, 'movements', id))
       return batch.commit()
     })
@@ -2937,54 +2919,13 @@ export default function App() {
   //
   // Only `mv.date`, the day it rosters from. A man Outfield on Thursday and MC on Friday
   // still moves out on Thursday and his seat is not in question.
-  //
-  // Every live manifest, not just the one on screen: the admin who changed a status was not
-  // necessarily looking at either, and each is judged against its own expected status.
-  //
-  // Called AFTER the status write commits, never inside its batch, and one commit per
-  // manifest: a batch cannot write the same document twice, and marking a whole platoon
-  // would otherwise hit one manifest once per man.
-  async function syncMovementSeats(date, changes) {
-    if (!changes.length) return
-    for (const mv of MV_KINDS.map((k) => movements[k])) {
-      if (!mv || date !== mv.date) continue
-      const expected = mv.statusId || statuses[0]?.id || null
-      // No status is NOT Present. An unmarked row wears a TINTED Present pill, which is the
-      // button offering to mark him; only the solid one says he was marked. So silence never
-      // counts as agreement, on either kind of manifest — a man keeps his seat for the
-      // expected status and for nothing else.
-      const assign = mv.assign || {}
-      const upd = {}
-      const drops = []
-      changes.forEach(({ accountId, statusId }) => {
-        if (!assign[accountId]) return
-        if (statusId === expected) return
-        drops.push(accountId)
-        upd[`assign.${accountId}`] = deleteField()
-      })
-      if (!Object.keys(upd).length) continue
-      try {
-        const batch = writeBatch(db)
-        batch.update(doc(db, 'movements', mv.id), upd)
-        const next = { ...assign }
-        drops.forEach((id) => delete next[id])
-        // His own card loses the seat; the men left on his truck lose a crew mate off theirs.
-        // One pass per affected vehicle, not per man — two off the same truck would otherwise
-        // rewrite the same cards twice in one batch.
-        drops.forEach((accId) => mirrorSelfMovement(batch, accId, mv.id, null))
-        ;[...new Set(drops.map((id) => assign[id].v))].forEach((vid) => writeVehicleCards(batch, mv, vid, next))
-        await batch.commit()
-      } catch (e) {}
-    }
-  }
-
   function unassignFromMovement(id, accountId) {
     const mv = movementById(id)
     const cur = mv && mv.assign && mv.assign[accountId]
     return movementWrite(() => {
       const batch = writeBatch(db)
       batch.update(doc(db, 'movements', id), { [`assign.${accountId}`]: deleteField() })
-      mirrorSelfMovement(batch, accountId, id, null)
+      if (!(cur && cur.att)) writeSeat(batch, accountId, id, null)
       // The people left behind lose a crew mate off their own card.
       if (cur) {
         const next = { ...mv.assign }
@@ -3777,186 +3718,7 @@ export default function App() {
   // and an admin with no platoon lands on a tab that matches nothing (empty list)
   // instead of falling back to company-wide setup.
   const adminScopedSubTab = account.isSuperAdmin ? adminSubTab : (account.groupId || '')
-  // All-groups attendance total for the super admin summary pinned in the nav bar.
-  // Attached personnel count as company strength ONLY while an exercise is running and
-  // only for the men actually on it — the status the manifest rosters from, so the people
-  // in the total are exactly the people on the vehicles. Off the exercise they go back to
-  // being lent, not part of the strength. The movements listener only ever holds a
-  // movement spanning today, so a past exercise resolves to null here and its attached men
-  // fall back to the chip alone rather than costing a read to look up.
-  const outfieldStatusOn = (day) =>
-    movement && movement.date <= day && (movement.until || movement.date) >= day
-      ? (movement.statusId || statuses[0]?.id || null)
-      : null
-
-  // Who was on a platoon's board for a given day. A finished day answers from its own
-  // stamp, so the company count and the report to higher stay true after a man transfers —
-  // otherwise both read him out of the platoon he is in NOW, find no status for him there,
-  // and file him under Unmarked while his real record sits unread in the platoon he left.
-  // Back-dating a report is a supported workflow, so this is the difference between sending
-  // higher the right figure and the wrong one.
-  function rosterOn(day, groupId) {
-    const st = attendanceStamp[`${day}__${groupId}`]
-    // A FROZEN day is read exactly like a past one, because that is what it is: the
-    // figure has gone up the chain, so the board must show the record rather than the
-    // live world. Without this an override edited in the afternoon, or a man transferred
-    // out, would change what a frozen board shows while the stored record stayed put —
-    // and the rules would reject any attempt to write the difference in.
-    if ((day < todayISO() || (st && st.frozen)) && st && Array.isArray(st.members)) {
-      const byId = {}
-      accounts.forEach((a) => { byId[a.id] = a })
-      return st.members.map((id) => byId[id] || { id, displayName: formerNames[id] || 'Former personnel', attached: false })
-    }
-    return accounts.filter((a) => (a.groupId || '') === groupId && activeOn(a, day))
-  }
-
-
-  // The morning count as a message you can paste into WhatsApp. `*stars*` are its bold
-  // markers; everything else is plain text so it survives being pasted anywhere else.
-  // Present is a number only — the point of the list is who ISN'T, and naming 200 people
-  // who turned up would bury the six who didn't. Unmarked comes last and is a status like
-  // the others here: nobody has said where they are, which is the thing to chase.
-  function buildFmcReport() {
-    // The day the card is showing, not necessarily today: tapping back to a past day and
-    // copying should give you that day's report, which is how a missed morning gets sent.
-    const day = selectedDate
-    const primaryStatusId = statuses[0]?.id
-    const people = []
-    // Attached personnel are kept out of the company's strength for the same reason as on
-    // the Count card — they are lent to it, not part of it — and reported in a block of
-    // their own at the end, so higher gets both numbers without either distorting the
-    // other.
-    const attached = []
-    const onExercise = outfieldStatusOn(day)
-    groups.forEach((g) => {
-      const entries = attendance[`${day}__${g.id}`] || {}
-      rosterOn(day, g.id)
-        // The full personnel name, not the nickname memberLabel prefers: this message
-        // goes to higher, where a person is their name on the nominal roll.
-        .forEach((a) => (a.attached ? attached : people).push({ name: (a.displayName || memberLabel(a)).toUpperCase(), statusId: entries[a.id] || null }))
-    })
-    // Built from the ISO parts, not toLocaleDateString: the device's locale would put
-    // the month first on a US phone, and this line goes to higher in one fixed shape.
-    const dayLabel = dayTag(day)
-    // Attached men on the exercise are company strength for the day, but each name is
-    // written once and it is written in the ATTACHED block — so they are added to the
-    // headline figure here rather than folded into the status blocks. The blocks still
-    // reconcile: status blocks + Unmarked + ATTACHED = TOTAL STRENGTH.
-    const attachedInStrength = onExercise ? attached.filter((p) => p.statusId === onExercise).length : 0
-    const lines = [
-      `*FMC - ${dayLabel}*`,
-      `*TOTAL STRENGTH: ${people.length + attachedInStrength}*`,
-      `*PRESENT STRENGTH: ${people.filter((p) => p.statusId === primaryStatusId).length}*`,
-    ]
-    const block = (label, named) => {
-      if (!named.length) return
-      lines.push('', `*${label.toUpperCase()}: ${named.length}*`, ...named.map((p) => p.name))
-    }
-    statuses.slice(1).forEach((s) => block(s.label, people.filter((p) => p.statusId === s.id)))
-    block('Unmarked', people.filter((p) => !p.statusId))
-    // Each name carries its own status inline rather than sitting under status headings:
-    // the block is short, and it is read out as one list. Matches the ATTACHED chip on the
-    // card — men with no status against their name are not counted or listed.
-    const accountedFor = attached.filter((p) => p.statusId)
-    if (accountedFor.length) {
-      lines.push('', `*ATTACH: ${accountedFor.length}*`, ...accountedFor.map((p) => {
-        const label = (statuses.find((st) => st.id === p.statusId) || {}).label || ''
-        return label ? `${p.name} (${label.toUpperCase()})` : p.name
-      }))
-    }
-    return lines.join('\n')
-  }
-  async function copyFmcReport() {
-    try { await navigator.clipboard.writeText(buildFmcReport()) } catch (e) {}
-    setCopiedReport(true)
-    setTimeout(() => setCopiedReport(false), 1500)
-  }
-
-  // Only on a date that has one. An admin gets it off the shared manifest; a member gets
-  // it off their own card, which carries their vehicle and its crew — so a member never
-  // reads the (company-wide, admin-only) manifest and neither pays a read to find out.
-  // A member keeps the tab for as long as he is on ANY manifest, not only one running
-  // today: next week's move-out is the thing he most wants to look up, and the selector
-  // above lets him pick which of the two he is looking at.
-  // One date row in the nav bar, and one date behind it. The Activity screens used to carry
-  // their own `activityDate`, kept apart so that paging one tab back a day did not move the
-  // other — a real problem when they were two tabs read side by side. Inside one tab it is
-  // the opposite problem: one screen cannot show two days, and the sheet you open belongs to
-  // the day the card above it is captioned with.
-  const navDate = selectedDate
-  const setNavDate = setSelectedDate
-  // Whether the nav bar is carrying a date row at all. It governs THREE things that only
-  // make sense together — the row itself, the platoon selector's bottom margin, and the nav
-  // bar's own bottom padding — so it is one flag rather than three copies of the condition.
-  // Miss any one of them and the row lands hard against the platoon pills with too much air
-  // under it, which is exactly what the Activity tab did before this existed.
-  //
-  // Stays up while a roster is OPEN, which it used not to. A sheet belongs to a day, and
-  // the roster showed only its name — so marking a past day, the one fact that decides
-  // whether the ticks are going anywhere sensible was the one fact not on screen.
-  // A member's board keeps the arrow row; an admin picks his day on the calendar and the
-  // row he gets on a board is the caption below.
-  //
-  // An ADMIN gets it only once a screen is open, where it is a caption saying which day these
-  // ticks are going onto; on his day screen the calendar below is already the date control and
-  // every card is captioned. A MEMBER gets it on every screen of the tab — the arrow row IS
-  // how he changes his day, and behind the Activities row the same row carries his way back.
-  const showDateNav = tab === 'today' && (isAdmin ? !!openScreen : true)
-  // The merged tab's two layers, named once. `todayCards` is the company screen — admins
-  // only, nothing open. `todayBoard` is one platoon's board, which is what a member always
-  // sees and what an admin sees once he has opened one.
-  const todayCards = tab === 'today' && isAdmin && !openScreen
-  const todayBoard = tab === 'today' && (!isAdmin ? !openScreen : openScreen === 'board')
-  // The sheet list and everything under it. A member reaches it too — his is MyActivityView,
-  // the same screen from the other end.
-  const activitiesOpen = tab === 'today' && openScreen === 'activities'
-  // The ONE place inside the activity screens that still offers platoons: a company sheet
-  // held open. That sheet is one sheet run in five platoons, so switching is a move between
-  // two halves of the same thing and you are marking the same roster either side.
-  //
-  // The sheet LIST no longer does. It used to carry the full selector, and Roy's objection is
-  // that it made the list a second place to choose a platoon: the day screen already has
-  // one, and having two meant the platoon could change under you on a screen whose whole job
-  // is to show one platoon's sheets. Going back to Summary and picking there is one more tap
-  // and no ambiguity. What stands in its place is a label — see the solo pill in the header.
-  //
-  // A platoon sheet held open has no selector either, and never did: it exists in one platoon
-  // and nowhere else, so there is nothing to switch to.
-  const activityKeepsSelector = activitiesOpen && !!activityOpen && activityScope === 'company'
-  // Where the platoon on screen sits in the list the pills are built from, so a swipe and
-  // a tap always agree on what "next" means. Shared by both swiping tabs.
-  // Which platoons the selector offers. Every tab gets all of them except the ACTIVITY tab,
-  // which drops the platoons that have nobody in them.
-  //
-  // Not a display tidy-up — those segments have nothing behind them. A platoon with no
-  // personnel cannot have an activity created for it, platoon-scoped or otherwise, and a
-  // company sheet duplicated into it can only ever say "Nobody in this Platoon yet". On a
-  // sheet you are working through, each one is a swipe between the platoons that do have
-  // people.
-  //
-  // The Activity tab only. On Today an empty platoon still has to be reachable: the board
-  // is where you notice it is empty, and the Admin tab is where you go and fill it.
-  //
-  // The active platoon is kept in the list even when it fails the test, so the render
-  // between arriving on this tab and the effect above moving you off cannot leave the
-  // selector with no active segment and the swipe with no neighbours.
-  //
-  // One selector, ONE memory behind it now. The Activity screens used to keep a platoon of
-  // their own, which was right while they were a tab beside Today: switching tabs should not
-  // have walked you across the company. They are a screen INSIDE Today now — one selector,
-  // one thing it selects — so a second memory would mean tapping Activities silently changed
-  // which platoon you were reading, which is the bug the split existed to prevent.
-  //
-  // The Platoon tab keeps its own (`groupTabGroupId`): still a different tab, still a
-  // different job.
-  // Empty platoons drop out on the sheet list and on any day already past — see the effect
-  // above for why those two and not the day screen's today. `|| g.id === activeGroupId` is
-  // the belt to that effect's braces: it keeps the pill the screen is actually on drawn for
-  // the one render before the effect moves off it, so the track never shows a highlight on
-  // nothing.
-  const selectorGroups = (activitiesOpen || selectedDate < todayISO())
-    ? groups.filter((g) => peopledGroupIds.has(g.id) || g.id === activeGroupId)
-    : groups
+  const selectorGroups = groups
   // Where an empty platoon gets filled: the Admin tab's Unassigned sub-tab, holding everyone
   // with no platoon. Super admin only — `adminScopedSubTab` pins a platoon admin to his own
   // platoon, so there is no Unassigned tab for him to be sent to, and posting people between
@@ -3976,14 +3738,6 @@ export default function App() {
   // because that sheet exists in one platoon and nowhere else — so there is nothing to
   // swipe to either, and the gesture goes with it.
   const groupSwipe = canPageGroups && tab === 'group'
-  // Every screen of the merged tab. On the day screen the swipe moves the platoon card and
-  // the calendar under it; on a board it moves the board; on the sheet list it moves the
-  // list. Same gesture, same pills, same `activeGroupId` — which is why one flag covers all
-  // three, where there used to be one for Today and a second for Activity.
-  //
-  // The exception is a PLATOON-scoped sheet held open: it exists in one platoon and nowhere
-  // else, so there is nothing to swipe to and the pills are not up either.
-  const todaySwipe = canPageGroups && tab === 'today' && (openScreen !== 'activities' || activityKeepsSelector)
   // Settings pages the pills that ARE there: General and Unassigned are not platoons, but
   // they are two of the segments, and a swipe that skipped them would disagree with the
   // control above it.
@@ -3992,13 +3746,6 @@ export default function App() {
   const adminPrevId = adminIdx > 0 ? adminTabIds[adminIdx - 1] : ''
   const adminNextId = adminIdx >= 0 && adminIdx < adminTabIds.length - 1 ? adminTabIds[adminIdx + 1] : ''
   const adminSwipe = !!account.isSuperAdmin && tab === 'admin' && isAdmin
-  // Which tabs carry their platoon selector BELOW the nav bar's separator instead of
-  // inside it. Count joins Activity: on both, everything above the line is the company's
-  // — the sheet and the day, or the FMC total — and everything below belongs to one
-  // platoon, so the pills read as the boundary between the two rather than as one more
-  // row of header.
-  const pinnedSelector = account.isSuperAdmin && isAdmin
-    && tab === 'today' && (openScreen !== 'activities' || activityKeepsSelector)
   // With a sheet open the date is a CAPTION, not a control: it says which day these ticks
   // are going onto, and that is all it is for. Left live, every one of its three ways to
   // change the day — either arrow, the picker, the Today pill — closed the sheet out from
@@ -4059,15 +3806,11 @@ export default function App() {
     // this manifest's last day). Reading today's board would show an empty roster right up
     // until the morning, which is the one morning nobody has time to build a manifest.
     const day = movement.date
-    const sourceId = movement.statusId || statuses[0]?.id
     const scope = account.isSuperAdmin ? groups : groups.filter((g) => g.id === account.groupId)
     // EVERY man on strength, not the ones marked for it. A manifest is a plan, drawn up
     // before anyone can know who will be on MC that morning, and a plan you can only draw
     // from people already marked is a plan you have to fake the roll call to make.
     //
-    // `sourceId` survives as the EXPECTED status, not as a filter: it is what the manifest
-    // is compared against once the day arrives (see movementDayStatuses). Nothing here
-    // writes a status, and nothing about a status decides who may be seated.
     const people = []
     scope.forEach((g) => {
       accounts.forEach((a) => {
@@ -4075,24 +3818,9 @@ export default function App() {
         people.push(a)
       })
     })
-    return { people, sourceId, companyWide: !!account.isSuperAdmin }
+    return { people, companyWide: !!account.isSuperAdmin }
   }
   const movementRoster = movementRosterFor(movement)
-
-  // What the board actually says, for the manifest's own day, keyed by account. The plan is
-  // compared against this on screen and NEVER written back to it.
-  //
-  // Free: the manifest's day is already subscribed for both admin kinds — the super admin's
-  // all-groups listener and the platoon admin's single getDoc — so reading it again here
-  // costs nothing. Entries are plain status ids.
-  function movementDayStatusesFor(mv) {
-    if (!mv || !isAdmin) return {}
-    const scope = account.isSuperAdmin ? groups : groups.filter((g) => g.id === account.groupId)
-    const out = {}
-    scope.forEach((g) => Object.assign(out, attendance[`${mv.date}__${g.id}`] || {}))
-    return out
-  }
-  const movementDayStatuses = movementDayStatusesFor(movement)
 
   // The manifest kinds that actually EXIST — the same list the segmented control is built
   // from, hoisted so a swipe and a tap can never disagree about what is next to what. An
@@ -4164,7 +3892,7 @@ export default function App() {
           7px clear of the line, while a card's background runs to its edge and 3 is 3. The
           10px default is neither — it is room for a segmented track's reserved scrollbar to
           tuck into, and on these two tabs the track has moved below the line. */}
-      <div className="nav-bar" style={showDateNav ? { paddingBottom: 3 } : pinnedSelector ? { paddingBottom: 7 } : undefined}>
+      <div className="nav-bar">
         {/* No margin under the title row, and a slightly wider one under the name line
             below it. The two look lopsided when they match: even at line-height 1 the
             title's line box carries empty leading beneath its capitals, so the air
@@ -4324,19 +4052,6 @@ export default function App() {
           Today, Count and Activity. The Platoon tab still keeps its selector in the nav
           bar, which is why this is a second copy of the track rather than the same one
           moved. */}
-      {pinnedSelector && (
-        <div style={{ flexShrink: 0, background: 'var(--nav-bg)', padding: '8px 16px 5px' }}>
-          <div className="segmented-scroll">
-            <div className="segmented">
-              <span className="seg-pill" />
-              {selectorGroups.map((g) => (
-                <button key={g.id} className={activeGroupId === g.id ? 'active' : ''} onClick={() => setActiveGroupId(g.id)}>{g.name}</button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Above the swipe, not inside it. It was inside each platoon's page, which meant two
           identical copies sliding past each other every time a super admin paged between
           platoons — the card and the calendar under it change, these do not. Out here it sits
@@ -4353,7 +4068,7 @@ export default function App() {
       <div
         ref={scrollRef}
         className="rc-scroll"
-        style={{ flex: 1, padding: 16, paddingTop: 10, paddingBottom: 90, position: 'relative', overflowX: todaySwipe || groupSwipe || adminSwipe || movementSwipe ? 'hidden' : undefined }}
+        style={{ flex: 1, padding: 16, paddingTop: 10, paddingBottom: 90, position: 'relative', overflowX: groupSwipe || adminSwipe || movementSwipe ? 'hidden' : undefined }}
       >
         {tab === 'group' && (() => {
           // One platoon's Personnel list. It costs nothing to draw a neighbour: a super
@@ -4412,7 +4127,7 @@ export default function App() {
               // rule; the page you landed on did not), but the pills always did it too.
               <MovementView
                 key={mv.id}
-                movement={mv} roster={roster} dayStatuses={movementDayStatusesFor(mv)} accounts={accounts} groups={groups} statuses={statuses} account={account}
+                movement={mv} roster={roster} accounts={accounts} groups={groups} account={account}
                 assignToVehicle={live ? assignToVehicle : SWIPE_NOOP} setMovementRole={live ? setMovementRole : SWIPE_NOOP} unassignFromMovement={live ? unassignFromMovement : SWIPE_NOOP}
                 setMovementPublished={live ? setMovementPublished : SWIPE_NOOP}
                 onSetUpVehicles={live ? (() => setMovementSetupOpen(true)) : SWIPE_NOOP}
@@ -4451,7 +4166,7 @@ export default function App() {
           // it — so a neighbour is given neither the popup nor the setter that clears it.
           const adminPage = (sub, live) => (
           <AdminView
-            accounts={accounts} groups={groups} statuses={statuses} checkinSettings={checkinSettings} account={account}
+            accounts={accounts} groups={groups} account={account}
             createAccount={createAccount} removeAccount={removeAccount} returnToPlatoon={returnToPlatoon} addGroup={addGroup} removeGroup={removeGroup} renameGroup={renameGroup}
             reorderGroup={reorderGroup} setGroupOrder={setGroupOrder} setAccountGroup={setAccountGroup}
             addMiniGroup={addMiniGroup} renameMiniGroup={renameMiniGroup} removeMiniGroup={removeMiniGroup} reorderMiniGroup={reorderMiniGroup} setMiniGroupOrder={setMiniGroupOrder}
@@ -4503,7 +4218,7 @@ export default function App() {
           onBack={mvSetupBack || undefined}>
           <MovementSetupCard
             onBackChange={(fn) => setMvSetupBack(() => fn)}
-            movements={movements} fleet={movementFleet} statuses={statuses}
+            movements={movements} fleet={movementFleet}
             onDone={() => setMovementSetupOpen(false)}
             eventFrom={(groups[0] || {}).eventFrom || ''} eventTo={(groups[0] || {}).eventTo || ''}
             saveMovement={saveMovement} removeMovement={removeMovement} removeMovementVehicle={removeMovementVehicle}
@@ -5702,7 +5417,7 @@ function Sheet({ onClose, closing, children }) {
   )
 }
 
-function MovementView({ movement, roster, dayStatuses, accounts, groups, statuses, account, assignToVehicle, setMovementRole, unassignFromMovement, setMovementPublished, onSetUpVehicles }) {
+function MovementView({ movement, roster, accounts, groups, account, assignToVehicle, setMovementRole, unassignFromMovement, setMovementPublished, onSetUpVehicles }) {
   const [picker, setPicker] = useState(null)   // { vehicleId }
   const [sheet, setSheet] = useState(null)     // { accountId }
   const [search, setSearch] = useState('')
@@ -5732,13 +5447,10 @@ function MovementView({ movement, roster, dayStatuses, accounts, groups, statuse
 
   const assign = movement.assign || {}
   const vehicles = Object.entries(movement.vehicles || {}).sort((a, b) => (a[1].order || 0) - (b[1].order || 0))
-  const sourceLabel = (statuses.find((s) => s.id === (movement.statusId || statuses[0]?.id)) || {}).label || ''
-  // Present is statuses[0], the default source. A manifest rostered from it is an ordinary
-  // activity — a range day, a turnout — not a move-out, and none of the outfield's apparatus
-  // applies: no advance party, no wave to command, and no claim in the title that this is an
-  // exercise. Everything below keys off THIS, never off a status label, for the same reason
-  // the roster source itself does: renaming Outfield must not change how the app behaves.
-  const isActivity = !movement.statusId || movement.statusId === (statuses[0] || {}).id
+  // An activity — a range day, a turnout — has no waves: no advance party, no wave to
+  // command. An outfield does. Read straight off the manifest's own kind now that there
+  // are no statuses to infer it from.
+  const isActivity = movementKind(movement) === 'activity'
   // On screen it is just "Vehicle Manifest", both kinds. The selector directly above says
   // which one you are looking at, so naming it again in the heading underneath said the same
   // word twice — and "OUTFIELD VEHICLE MANIFEST" was long enough to crowd everything else off
@@ -5748,7 +5460,7 @@ function MovementView({ movement, roster, dayStatuses, accounts, groups, statuse
   // selector with it, so it has to say what it is. Derived rather than two hardcoded cases,
   // so a third roster source added later names itself.
   const manifestTitle = 'Vehicle Manifest'
-  const reportTitle = isActivity ? 'VEHICLE MANIFEST' : `${sourceLabel.toUpperCase()} VEHICLE MANIFEST`
+  const reportTitle = isActivity ? 'VEHICLE MANIFEST' : 'OUTFIELD VEHICLE MANIFEST'
   const unassigned = roster.people.filter((p) => !assign[p.id])
   // Platoon counts, and whether they need two lines.
   const platoonCounts = groups
@@ -5798,7 +5510,7 @@ function MovementView({ movement, roster, dayStatuses, accounts, groups, statuse
   // The headline figure wears the primary status colour, the same as the big number on
   // the Count tab's card — one number, one colour, wherever a strength is stated.
   // Declared after the figure it measures: centreUnderPill needs the digit count.
-  const totalInk = { display: 'inline-block', ...centreUnderPill(headlineTotal), fontSize: 24, fontWeight: 700, lineHeight: 1, color: statuses[0]?.color || 'var(--blue)' }
+  const totalInk = { display: 'inline-block', ...centreUnderPill(headlineTotal), fontSize: 24, fontWeight: 700, lineHeight: 1, color: 'var(--blue)' }
   // "Assigned", not the roster source. This number counts SEATS FILLED, and labelling it
   // with the status the roster came from described the wrong thing entirely — it only ever
   // read correctly because nearly everyone marked Outfield ends up on a truck. An activity
@@ -5850,33 +5562,6 @@ function MovementView({ movement, roster, dayStatuses, accounts, groups, statuse
   }
   const inVehicle = (vid) => Object.entries(assign).filter(([, a]) => a.v === vid)
   // ---- Plan versus record -------------------------------------------------------
-  // The manifest says who was MEANT to be on each truck. The board says what is true on the
-  // day. Nothing here changes either one; it only reports where they disagree.
-  //
-  // Only from the start date. Before it, every man is unmarked and every row would carry a
-  // chip saying so — a warning about a morning that has not happened yet.
-  const expectedId = movement.statusId || statuses[0]?.id
-  const dayArrived = todayISO() >= movement.date
-  // Two ways the plan and the morning disagree, and both need saying.
-  //
-  // SEATED, NEVER MARKED. A seat is only dropped on a status WRITE — mark a man MC and he
-  // comes off the truck at once — but nobody writes anything for a man nobody touches, so he
-  // sits there undeclared and no drop ever fires. That is the ordinary state of a manifest
-  // built in advance: everyone on it is unmarked until the morning. On the morning this is
-  // the to-do list, emptying as the roll call is taken; what is left at the end is men on
-  // trucks the roll call never accounted for.
-  //
-  // MARKED, ON NO VEHICLE — the man left standing at the parade square.
-  //
-  // Both apply to an activity exactly as to an outfield. No status is not Present: an
-  // unmarked row wears the TINTED Present pill, which is the offer to mark him, and only the
-  // solid one is the record. So neither line can be waved away as "he was Present anyway".
-  const seatedUnmarked = !dayArrived ? [] : Object.keys(assign).filter((id) => (dayStatuses || {})[id] !== expectedId)
-  // Which truck each one is on, so the vehicle can say so while it is still shut. The count
-  // above tells you how many there are; this tells you where to look, without opening five
-  // vehicles to find the one man holding the manifest up.
-  const vehHasUnmarked = (vid) => seatedUnmarked.some((id) => assign[id] && assign[id].v === vid)
-  const markedNotSeated = !dayArrived ? [] : roster.people.filter((p) => !assign[p.id] && (dayStatuses || {})[p.id] === expectedId)
   const partyOf = (p) => vehicles.filter(([, v]) => (v.party || 'main') === p)
   // How the vehicles divide, what each division is called, and which vehicles are in it.
   //
@@ -6580,33 +6265,6 @@ function MovementView({ movement, roster, dayStatuses, accounts, groups, statuse
             whole list one per line — the run-on "· · ·" it used to be could only ever
             show the first eight, and a name you were hunting for might be in the
             "+88 more". */}
-        {/* Where the plan and the morning disagree. Only from the start date, and only the
-            counts — the detail is on the rows themselves, which is where you act on it. */}
-        {(seatedUnmarked.length > 0 || markedNotSeated.length > 0) && (
-          /* An edge, like every other amber thing on this screen. AMBER_EDGE is the same
-              stroke the No DVR and No VC chips carry, so the bar reads as the same kind of
-              warning at card scale rather than as a tinted panel that happens to be
-              orange — and on a card that is itself a filled surface, a wash with no
-              boundary is the one shape here that does not say where it ends. */
-          <div style={{ background: amber, border: AMBER_EDGE, borderRadius: 14, padding: '12px 16px', marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {seatedUnmarked.length > 0 && (
-              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <TriangleAlert size={14} color={amberInk} style={{ flexShrink: 0 }} />
-                <span style={{ fontSize: 12, color: amberInk, fontWeight: 600 }}>
-                  {seatedUnmarked.length} Not Marked {sourceLabel} Yet.
-                </span>
-              </span>
-            )}
-            {markedNotSeated.length > 0 && (
-              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <TriangleAlert size={14} color={amberInk} style={{ flexShrink: 0 }} />
-                <span style={{ fontSize: 12, color: amberInk, fontWeight: 600 }}>
-                  {markedNotSeated.length} marked {sourceLabel}, Not Assigned a Vehicle Yet.
-                </span>
-              </span>
-            )}
-          </div>
-        )}
       </section>
 
       {vehicles.length === 0 ? (
@@ -6741,11 +6399,6 @@ function MovementView({ movement, roster, dayStatuses, accounts, groups, statuse
                             longer than this company's. A fraction beside a truck reads as
                             seats filled without being told so. */}
                         <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--blue)', textTransform: 'uppercase', letterSpacing: '0.06em', flexShrink: 0 }}>{rows.length}{v.seats ? `/${v.seats}` : ''}</span>
-                        {/* Beside the head count, because it is a fact about the men on this
-                            truck rather than about the truck itself — and it has to be
-                            readable with the vehicle shut, which is how the list is scanned
-                            on a move-out morning. */}
-                        {vehHasUnmarked(id) && <TriangleAlert size={12} color={amberInk} style={{ flexShrink: 0, alignSelf: 'center', position: 'relative', top: 0.5 }} />}
                       </span>
                     {/* The chips share the callsign's line and nothing else. They used to
                         share it with a two-line block whose second line was the plate, which
@@ -6817,17 +6470,6 @@ function MovementView({ movement, roster, dayStatuses, accounts, groups, statuse
                           {isAttached(accId, a) && sectionOf(accId, a) && (
                             <span style={{ background: violet, border: VIOLET_EDGE, color: violetInk, fontSize: 10, fontWeight: 600, lineHeight: '15px', padding: '2px 8px', borderRadius: 999, flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.04em', marginLeft: -4 }}>{sectionOf(accId, a)}</span>
                           )}
-                          {/* The roll call has not accounted for this man. Same triangle the
-                              vehicle header wears, on the name it is actually about — the
-                              header says which truck to open, this says who to look for. He
-                              is not dropped, because nothing was ever written for him to
-                              drop on; marking him is what settles it either way. */}
-                          {seatedUnmarked.includes(accId) && (
-                            // marginLeft pulls it back from the row's 8px gap to 4. It is not
-                            // another tag in the series beside it — it is a mark ON the name,
-                            // and at the pills' own spacing it read as a third pill.
-                            <TriangleAlert size={12} color={amberInk} style={{ flexShrink: 0, alignSelf: 'center', position: 'relative', top: 0.5, marginLeft: -4 }} />
-                          )}
                         </span>
                       </span>
                       {/* Every appointment wears the same solid pill, Troop included. Troop used to be
@@ -6864,7 +6506,7 @@ function MovementView({ movement, roster, dayStatuses, accounts, groups, statuse
 //
 // Opens on Outfield Setup rather than the leftmost tab: the fleet is the thing you set up
 // once, and the manifest is the thing you come back to.
-function MovementSetupCard({ movements, fleet, statuses, onDone, saveMovement, removeMovement, removeMovementVehicle, setVehicleParty, setMovementRange, setMovementPublished, saveFleetVehicle, removeFleetVehicle, onBackChange, eventFrom, eventTo }) {
+function MovementSetupCard({ movements, fleet, onDone, saveMovement, removeMovement, removeMovementVehicle, setVehicleParty, setMovementRange, setMovementPublished, saveFleetVehicle, removeFleetVehicle, onBackChange, eventFrom, eventTo }) {
   const [seg, setSeg] = useState('outfield')
   const kind = seg === 'fleet' ? null : seg
   const movement = (kind && movements[kind]) || null
@@ -6875,8 +6517,6 @@ function MovementSetupCard({ movements, fleet, statuses, onDone, saveMovement, r
   // Never a label match, always the flag: renaming Outfield must not quietly switch this off,
   // exactly as with MC's requiresDoc. If no status carries the flag there is nothing for a
   // move-out to roster from, and it falls back to Present rather than to nothing at all.
-  const sourceFor = (k) => (k === 'activity' ? '' : ((statuses.find((x) => x.rosterSource) || {}).id || ''))
-  const statusId = sourceFor(kind)
   const isActivity = kind === 'activity'
   // An outfield and an activity only happen DURING an ICT, so the period is the frame their
   // dates sit in - the same frame a reporting-location override already sits in. Enforced
@@ -6906,9 +6546,7 @@ function MovementSetupCard({ movements, fleet, statuses, onDone, saveMovement, r
   // could be; an activity rostered from Present is not one. Written on every save, so an
   // older manifest picks up its own name the next time it is touched.
   //
-  // Must sit below `statusId`: reaching a `const` declared further down is a temporal dead
-  // zone the production build compiles happily and the first render throws on.
-  const name = ((statuses.find((x) => x.id === (statusId || statuses[0]?.id)) || {}).label || 'OUTFIELD').toUpperCase()
+  const name = (kind === 'activity' ? 'ACTIVITY' : 'OUTFIELD')
   // Each tab is a different manifest, so the draft starts again on its own dates when the
   // tab changes. Without this, switching to Activity would show the outfield's dates in a
   // form that saves to the activity.
@@ -6958,7 +6596,7 @@ function MovementSetupCard({ movements, fleet, statuses, onDone, saveMovement, r
   // start date silently created a SECOND document and orphaned the first, which is what the
   // date-keyed build did.
   const mvId = movement?.id || movementDocId(kind, date)
-  const dirty = !movement || date !== movement.date || to !== (movement.until || movement.date) || (statusId || '') !== (movement.statusId || '')
+  const dirty = !movement || date !== movement.date || to !== (movement.until || movement.date)
   const saveSetup = async () => {
     // An empty end date is its own complaint, not a comparison. A date field hands back an
     // empty string both when it was never filled in and when what was typed is not a real
@@ -6988,7 +6626,7 @@ function MovementSetupCard({ movements, fleet, statuses, onDone, saveMovement, r
     // A manifest that does not exist yet is created as a DRAFT — the whole point is that it
     // is built before anyone is told about it. An existing one keeps whatever it already is,
     // so saving a date on a published manifest does not silently pull it off every phone.
-    if (!(await run(saveMovement(mvId, date, { name: name.trim(), kind, statusId: statusId || null, until: to, ...(movement ? null : { published: false }) })))) return
+    if (!(await run(saveMovement(mvId, date, { name: name.trim(), kind, until: to, ...(movement ? null : { published: false }) })))) return
     // Each rider's own card carries the movement's dates AND its party, so a changed end
     // date or a changed roster source has to be mirrored onto all of them — saveMovement
     // alone only touches the manifest.
@@ -6996,9 +6634,8 @@ function MovementSetupCard({ movements, fleet, statuses, onDone, saveMovement, r
     // The source matters because a party is written onto every seat and an activity has
     // none: switch a move-out to Present and, without this, every man's phone would go on
     // saying "Main Body" for a wave that no longer exists.
-    const wasActivity = movement && (!movement.statusId || movement.statusId === statuses[0]?.id)
-    if (movement && ((movement.until || movement.date) !== to || wasActivity !== isActivity)) {
-      await run(setMovementRange(mvId, date, to, statusId || null))
+    if (movement && (movement.until || movement.date) !== to) {
+      await run(setMovementRange(mvId, date, to))
     }
     // Save is the end of this card's job — the dates and the roster source are set, and
     // the vehicles below are edited on the Movement tab. Only on the way through: a
@@ -7028,7 +6665,7 @@ function MovementSetupCard({ movements, fleet, statuses, onDone, saveMovement, r
   async function addFromFleet(id) {
     const v = fleet[id]
     if (!v) return
-    if (await run(saveMovement(mvId, date, { name: name.trim(), kind, statusId: statusId || null, until: to, ...(movement ? null : { published: false }), vehicles: { [id]: { ...v, party: 'main', order: vehicles.length } } }))) setAdding(false)
+    if (await run(saveMovement(mvId, date, { name: name.trim(), kind, until: to, ...(movement ? null : { published: false }), vehicles: { [id]: { ...v, party: 'main', order: vehicles.length } } }))) setAdding(false)
   }
 
   // Every field, not just the callsign: a vehicle with no plate or no seat count is a
@@ -7071,12 +6708,12 @@ function MovementSetupCard({ movements, fleet, statuses, onDone, saveMovement, r
       // went out that day, not a view of the fleet as it is now.
       if (ok && d.id && inManifest.has(d.id)) {
         const cur = (movement && movement.vehicles && movement.vehicles[d.id]) || {}
-        ok = await run(saveMovement(mvId, date, { name: name.trim(), kind, statusId: statusId || null, until: to, vehicles: { [d.id]: { ...veh, party: cur.party || 'main', order: cur.order ?? vehicles.length } } }))
+        ok = await run(saveMovement(mvId, date, { name: name.trim(), kind, until: to, vehicles: { [d.id]: { ...veh, party: cur.party || 'main', order: cur.order ?? vehicles.length } } }))
       }
     } else {
       const isNew = !d.id
       const id = d.id || newId()
-      ok = await run(saveMovement(mvId, date, { name: name.trim(), kind, statusId: statusId || null, until: to, vehicles: { [id]: { ...veh, party: d.party || 'main', order: d.order ?? vehicles.length } } }))
+      ok = await run(saveMovement(mvId, date, { name: name.trim(), kind, until: to, vehicles: { [id]: { ...veh, party: d.party || 'main', order: d.order ?? vehicles.length } } }))
       // A vehicle typed in here ALWAYS joins the standing fleet as well. This used to be a
       // `Save to fleet` tick, off by default, and the default was wrong: the fleet is the
       // trucks the unit has, and typing a callsign, type, plate and seat count is saying
