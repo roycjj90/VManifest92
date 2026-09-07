@@ -224,21 +224,6 @@ service cloud.firestore {
       allow write: if isSuperAdmin();
     }
 
-    // Names-only member roster, denormalized per group so a regular member can see
-    // who's in their group WITHOUT reading other accounts (which stay locked down).
-    // The doc carries ONLY { members: { <accountId>: label } } — no phone/accountFields,
-    // no password hash. Read is scoped to the caller's OWN group via the users mirror
-    // (super admin spans all); admins write it (reconciled from accounts client-side).
-    // Additive/zero-risk like authIndex: publish this block BEFORE deploying the client
-    // that reads/writes rosters. `list` is intentionally not granted (no enumeration).
-    // Keyed by COMPANY now, not platoon — six documents that carry every seatable
-    // person, names only, so nobody has to read 500 account documents to draw a list.
-    // Also 'ATTACHED' (the battalion-wide attached pool) and 'UNFILED' (platoons not
-    // yet under a company).
-    //
-    // An admin lists the whole collection; a member gets their own company's document
-    // and nothing else. `list` is admin-only on purpose: a member reading one company
-    // is their own unit, a member reading all six is the battalion's nominal roll.
     // Five documents naming the battalion's companies. Read by everyone signed in:
     // a platoon's company name appears on a rider's crew list, and hiding the list
     // of company NAMES protects nothing.
@@ -247,6 +232,15 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    // Names-only personnel roster, one document per COMPANY, plus 'ATTACHED' (the
+    // battalion-wide attached pool) and 'UNFILED' (platoons not yet under a company).
+    // Six documents that carry every seatable person, so nobody has to read 500
+    // account documents to draw a list. Carries no phone number, no password hash,
+    // no account fields.
+    //
+    // An admin lists the whole collection; a member gets their own company's document
+    // and nothing else. `list` is admin-only on purpose: a member reading one company
+    // is their own unit, a member reading all six is the battalion's nominal roll.
     match /rosters/{companyId} {
       allow get: if isAdmin()
                  || (signedIn() && myMirror().get('companyId', '') == companyId);
@@ -307,31 +301,6 @@ service cloud.firestore {
     }
 
 
-    // Per-person mirror of TODAY's own attendance — doc id is the accountId, one
-    // card per member, overwritten each morning (see mirrorSelfCard in src/App.jsx).
-    //
-    // Why it exists: attendance is one document per platoon per day, and Firestore
-    // hands out whole documents only. A basic member reads exactly one line of that
-    // board (their own status), but subscribing to it billed them a read for every
-    // OTHER member's change too — N members each paying N reads at muster. Admins
-    // still watch the board because they genuinely need every row; members watch
-    // this instead, at one read per change to their own row.
-    //
-    // Grants no authority that isn't already held: every writer here also controls
-    // the board write this accompanies (a member marks themselves, an admin marks
-    // anyone), and the two always go in one atomic batch. Read is self-or-admin —
-    // a member can only ever name their own accountId through isSelfAccount.
-    //
-    // Note: admin writes are NOT group-scoped here, unlike the board. Scoping would
-    // cost another get() per write to look up the target's group, and the blast
-    // radius is a stale status on one card whose matching board write the attendance
-    // rules would have rejected anyway.
-    //
-    // Additive and zero-risk to publish early: nothing reads or writes this
-    // collection until the client that does is deployed. It MUST go live first,
-    // though — the card write shares a batch with the board write, and a batch is
-    // all-or-nothing, so a client deployed against un-published rules would fail
-    // every attendance write, not just the mirror.
     // A rider's own seats, keyed by manifest id. This is the ONLY thing a non-admin
     // reads to find their vehicle: movements/ is admin-only and battalion-wide, so a
     // rider must never reach it, and everything they need is copied onto this document
@@ -346,34 +315,16 @@ service cloud.firestore {
     }
 
 
-    // The outfield vehicle manifest for one date — vehicles, seat assignments, and the
-    // ADVANCE PARTY / MAIN BODY split. Company-wide by necessity: a vehicle carries
-    // people from more than one platoon, so this cannot live in a per-platoon day doc
-    // the way activities can.
+    // A vehicle manifest: vehicles, seat assignments, and (on an outfield) the
+    // ADVANCE PARTY / MAIN BODY split. Battalion-wide by necessity — a convoy can
+    // carry men from two companies — plus `movements/fleet`, the saved vehicle list
+    // a new manifest is populated from, which holds no personal data at all.
     //
-    // Doc id is a YYYY-MM-DD date, except `movements/fleet` — the saved vehicle list a
-    // new manifest is populated from. Same block covers both; the fleet holds no
-    // personal data at all, just callsigns and seat counts.
-    //
-    // Admin-only in both directions, and NOT group-scoped. A platoon admin can read the
-    // whole manifest because a truck mixes platoons and a half-readable manifest is
-    // useless; the names they'd otherwise be unable to resolve (accounts reads are
-    // group-scoped) ride along denormalised on each assignment, exactly as rosters and
-    // formerMembers already do. Write is isAdmin() because a platoon sergeant seating
-    // their own people is the normal case, and the blast radius is a seating plan for
-    // one morning — not a record that has gone up the chain.
-    //
-    // Members never read this. Their own vehicle and role are mirrored onto their
-    // seats document, which they already listen to, so this collection costs a
-    // member nothing and needs no member-facing scope.
-    //
-    // Deliberately NOT under settings/{docId} or the attendance block: it is a plan,
-    // not a record, and coupling it to attendance would drag it into pastDayOK() and
-    // the freeze for no reason.
-    //
-    // Additive and inert: nothing reads or writes this collection until the client that
-    // does is deployed, so this is safe to publish first — and it MUST go first, since
-    // the assignment write shares an atomic batch with the seat write.
+    // ADMIN-ONLY in both directions. Riders never read this: their own vehicle, role
+    // and crew are copied onto their seats document, which they already listen to.
+    // That is the whole reason a rider's app open costs one read no matter how big
+    // the battalion gets — and why a manifest being readable by riders would undo it
+    // as well as handing every rider the battalion's movements.
     match /movements/{docId} {
       allow read: if isAdmin();
       allow write: if isAdmin();
