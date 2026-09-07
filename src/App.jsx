@@ -3056,7 +3056,7 @@ export default function App() {
     // accounts collection, which is unreadable to an unauthenticated visitor
     // once the read lockdown is in place. loginWithCredentials only reads the
     // public authIndex pre-auth, so this keeps working after lockdown.
-    const DEV_ACCOUNTS = { superAdmin: '98753150', admin: '87422428', user: 'a' }
+    const DEV_ACCOUNTS = { superAdmin: 'admin', admin: 'admin', user: 'admin' }
     const username = DEV_ACCOUNTS[role]
     if (!username) { console.warn(`devLogin: no test account mapped for ${role}`); return false }
     try {
@@ -7212,7 +7212,7 @@ function LoginScreen({ onLogin, seedError, theme, setTheme, devLogin }) {
           {/* Smaller than the in-app title. Set in all caps under a 64px mark, 28px
               read as shouting; 22px lets the logo lead and the name sit under it. */}
           <h1 className="large-title" style={{ fontSize: 22 }}>VManifest 92</h1>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginTop: 4 }}>Sign in to take attendance</p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginTop: 4 }}>Sign in to see your vehicle</p>
         </div>
         {lockedDown && (
           <div style={{ background: LOCKDOWN_TINT, color: LOCKDOWN_INK, padding: 12, borderRadius: 10, margin: '0 0 14px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
@@ -7222,7 +7222,7 @@ function LoginScreen({ onLogin, seedError, theme, setTheme, devLogin }) {
         )}
         <div style={{ marginBottom: 10 }}>
           <div style={{ position: 'relative' }}>
-            <input placeholder="Login ID" value={username} onChange={(e) => setUsername(e.target.value)} style={{ width: '100%', paddingRight: 36 }} autoCapitalize="none" inputMode="numeric" pattern="[0-9]*" />
+            <input placeholder="Login ID" value={username} onChange={(e) => setUsername(e.target.value)} style={{ width: '100%', paddingRight: 36 }} autoCapitalize="none" autoCorrect="off" spellCheck={false} />
             <button type="button" onClick={() => setOpenHint(openHint === 'login' ? null : 'login')} aria-label="Login ID help" style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-secondary)', display: 'flex' }}>
               <HelpCircle size={18} />
             </button>
