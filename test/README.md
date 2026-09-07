@@ -35,3 +35,24 @@ tally as `window.__reads`, so a test can assert on the bill:
 One caveat: the fake re-fires every listener on any write, so reads measured *after a
 write* are inflated. Real Firestore only bills the documents that actually changed.
 Trust the app-open numbers; treat post-write numbers as an upper bound.
+
+## Rules tests
+
+`rules.test.mjs` runs `firestore.rules` against the **real Firestore rules engine** in
+the Firebase emulator — not a simulation. It is the only way to know the rules do what
+they claim before publishing them.
+
+The tools are heavy and are deliberately NOT in `package.json`: they would be installed
+on every Vercel build for no reason. Install them when you need them:
+
+    npm install --no-save firebase-tools @firebase/rules-unit-testing
+    npx firebase emulators:start --only firestore --project vmanifest-test &
+    node test/rules.test.mjs
+
+`firebase.json` in the repo root already points the emulator at `firestore.rules`.
+
+What it asserts, in plain terms: a rider can read their own seat and nothing else; a
+rider cannot write their own seat, make themselves an admin, or move themselves to
+another platoon; manifests are admin-only; a rider gets their own company's roster but
+cannot list all six; the login lookup works before sign-in but cannot be enumerated;
+and every dropped collection is shut to everyone.

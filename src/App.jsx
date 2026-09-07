@@ -1965,7 +1965,7 @@ export default function App() {
   // in the setup card.
   const movementDate = movement ? movement.date : null
   const [movementFleet, setMovementFleet] = useState({})
-  // A member's own seat, off their attendanceSelf card. Deliberately NOT folded into the
+  // A member's own seat, off their seats document. Deliberately NOT folded into the
   // attendance* maps like the rest of the card: those are keyed by date__group and are
   // blanked when the card isn't today's, and a manifest is normally written the evening
   // before. This carries its own date and is gated on that alone.
@@ -5385,7 +5385,7 @@ function ReorderList({ items, staticItems, onReorder, renderRow, ghostLabel, row
 }
 
 // A member's own vehicle, and nobody else's. Everything here comes off their own
-// attendanceSelf card — they never touch the manifest, which is company-wide and would
+// seats document — they never touch the manifest, which is battalion-wide and would
 // hand every member every name in the company. Read-only by nature: a manifest is the
 // admin's plan, and there is nothing on this screen a passenger could change.
 // The Manifests tab's home screen. Every live manifest, earliest first, because the
@@ -7515,12 +7515,12 @@ function AdminView({
   // a gigabyte of free storage.
   //
   // What it IS for is the seat each rider is left holding. A published seat is copied
-  // onto the rider's own attendanceSelf card, carrying his vehicle AND the whole crew
+  // onto the rider's own seats document, carrying his vehicle AND the whole crew
   // list of that vehicle, because a member cannot read the manifest itself. That copy is
   // cleared when he is taken off a truck or the manifest is deleted — and by nothing
   // else. A manifest that simply ends leaves its seat on every rider's card for good.
   //
-  // attendanceSelf is read on every one of that member's logins, and Firestore caps a
+  // The seats document is read on every one of that member's logins, and Firestore caps a
   // document at 1 MiB. At roughly a couple of KB a seat, that is hundreds of manifests
   // away, so this is not urgent — but it never stops growing, and the clean-up has to
   // happen HERE because a finished manifest is not in the app's live state and so cannot
@@ -7573,7 +7573,7 @@ function AdminView({
         for (const accId of m.riders) {
           // Only this manifest's key is removed. A rider may hold a live seat on another
           // manifest at the same time, and the card is one document shared by both.
-          batch.set(doc(db, 'attendanceSelf', accId), { mvSeats: { [m.id]: deleteField() } }, { merge: true })
+          batch.set(doc(db, 'seats', accId), { seats: { [m.id]: deleteField() } }, { merge: true })
           writes++
           if (writes >= 400) { await batch.commit(); batch = writeBatch(db); writes = 0 }
         }
