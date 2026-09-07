@@ -2137,26 +2137,35 @@ export default function App() {
 
   useEffect(() => {
     if (localStorage.getItem('vmanifest92_seeded')) { setSeeded(true); return }
-    let settled = false
+    // The timer only decides when to STOP BLOCKING the login screen — it no longer
+    // decides whether the seed worked. A first-ever seed on a cold database is a
+    // dozen sequential round trips, and at 10s it routinely outran the timer and
+    // then, because the cache flag was written only `if (!settled)`, never recorded
+    // the success — so a database that had seeded perfectly well showed a connection
+    // error on every single load, forever.
+    let timedOut = false
     const timeout = setTimeout(() => {
-      if (!settled) {
-        settled = true
-        setSeedError("Couldn't reach Firebase after 10 seconds. Check that your Firestore database exists and your VITE_FIREBASE_... values in Vercel are correct.")
-        setSeeded(true)
-      }
-    }, 10000)
+      timedOut = true
+      setSeedError('Still setting up — Firebase is taking longer than 30 seconds. If this keeps happening, check that your Firestore database exists and your VITE_FIREBASE_... values in Vercel are correct.')
+      setSeeded(true)
+    }, 30000)
     ensureSeedData()
-      .then(() => { if (!settled) localStorage.setItem('vmanifest92_seeded', '1') })
+      // Unconditional: the seed either finished or it did not, and a slow one that
+      // finished is still a finished one.
+      .then(() => {
+        localStorage.setItem('vmanifest92_seeded', '1')
+        if (timedOut) setSeedError('')
+      })
       .catch((e) => {
         console.error('VManifest 92 seed error:', e)
-        setSeedError((e && e.message) || 'Could not connect to Firebase.')
+        // The Firebase error CODE is the whole diagnosis — permission-denied means
+        // rules, unavailable means it never got there — and dropping it left the
+        // screen saying "could not connect" for both.
+        setSeedError(`${(e && e.code) || 'error'}: ${(e && e.message) || 'Could not connect to Firebase.'}`)
       })
       .finally(() => {
-        if (!settled) {
-          settled = true
-          clearTimeout(timeout)
-          setSeeded(true)
-        }
+        clearTimeout(timeout)
+        setSeeded(true)
       })
     return () => clearTimeout(timeout)
   }, [])
@@ -7174,9 +7183,22 @@ function LoginScreen({ onLogin, seedError, theme, setTheme, devLogin }) {
           </button>
         )}
         {seedError && (
-          <p style={{ background: 'rgba(255,59,48,0.1)', color: 'var(--red)', fontSize: 13, padding: 10, borderRadius: 10, marginBottom: 14 }}>
-            Connection problem: {seedError}
-          </p>
+          <div style={{ background: 'rgba(255,59,48,0.1)', color: 'var(--red)', fontSize: 13, padding: 10, borderRadius: 10, marginBottom: 14 }}>
+            <p style={{ margin: 0 }}>Connection problem: {seedError}</p>
+            {/* Which settings actually made it into the BUILD. Vite bakes these in at
+                build time, so a variable saved in Vercel but not ticked for Production
+                is simply absent here — and the symptom is a connection that hangs rather
+                than anything that names itself. Safe to print: the Firebase web config
+                ships to every visitor anyway, and the API key is deliberately not shown
+                in full. Only ever on screen when something is already wrong. */}
+            <p style={{ margin: '8px 0 0', fontSize: 12, opacity: 0.85, wordBreak: 'break-all' }}>
+              Project: {import.meta.env.VITE_FIREBASE_PROJECT_ID || 'MISSING'}
+              {' · '}Key: {import.meta.env.VITE_FIREBASE_API_KEY ? 'set' : 'MISSING'}
+              {' · '}Auth domain: {import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'MISSING'}
+              {' · '}App ID: {import.meta.env.VITE_FIREBASE_APP_ID ? 'set' : 'MISSING'}
+              {' · '}Sender ID: {import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ? 'set' : 'MISSING'}
+            </p>
+          </div>
         )}
         {/* The tagline reads as a lead-in to the fields, so it sits nearer them than
             to the logo block above it. */}
