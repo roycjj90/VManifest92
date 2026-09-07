@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:build": "vite build --config vite.config.test.js",
+    "test:serve": "vite preview --port 4173"
   },
   "dependencies": {
     "firebase": "^10.12.0",

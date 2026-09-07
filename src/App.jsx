@@ -4147,6 +4147,18 @@ export default function App() {
             </SwipePages>
           )
         })()}
+        {/* The Manifests tab is always present now — it is what this app is for — so it
+            has to answer for itself on the ordinary day when no manifest has been built.
+            It used to come and go with the work, and an admin who opened it with nothing
+            running got a blank screen under a tab bar.
+
+            The button is the only route in: manifests are built from this card, and
+            sending someone to Settings to find it was the old way round. */}
+        {tab === 'movement' && isAdmin && !(movement && movementRoster) && (
+          <EmptyState icon={Truck} title="No Manifest Yet" body="Build one to start seating personnel onto vehicles.">
+            <button className="btn-primary" style={{ width: '100%' }} onClick={() => setMovementSetupOpen(true)}>Build a Manifest</button>
+          </EmptyState>
+        )}
         {tab === 'movement' && !isAdmin && (
           <SwipePages
             enabled={movementSwipe}
