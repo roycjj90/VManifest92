@@ -962,25 +962,45 @@ function sortAccountFields(arr) {
 
 async function ensureSeedData() {
   try {
+    const groupsSnap = await getDocs(collection(db, 'groups'))
+    const defaultGroupId = groupsSnap.empty
+      ? (await addDoc(collection(db, 'groups'), { name: 'General' })).id
+      : groupsSnap.docs[0].id
+
+    // ONE admin level, Roy's call: an admin sees the whole battalion, and everyone else
+    // is a member who sees their own seat. So two test accounts, one per level, for the
+    // two dev quick-login buttons. Both go before launch with the buttons — see PLAN.md
+    // Phase 6.
+    //
+    // `isSuperAdmin` stays as the flag that carries it. The pair is load-bearing all
+    // through this file and in firestore.rules; collapsing them into one flag is a
+    // rename, not a simplification, and it would break the rules' string matching for
+    // no behavioural gain. An admin here is simply always both.
     const accountsSnap = await getDocs(collection(db, 'accounts'))
-    const hasAdmin = accountsSnap.docs.some((d) => (d.data().username || '').toLowerCase() === 'admin')
-    if (!hasAdmin) {
+    const byName = new Map(accountsSnap.docs.map((d) => [(d.data().username || '').toLowerCase(), d]))
+    const SEED_ACCOUNTS = [
+      { username: 'admin', displayName: 'Admin', isAdmin: true, isSuperAdmin: true, groupId: '' },
+      { username: 'user', displayName: 'User', isAdmin: false, isSuperAdmin: false, groupId: defaultGroupId },
+    ]
+    const missing = SEED_ACCOUNTS.filter((a) => !byName.has(a.username))
+    if (missing.length) {
       const hash = await hashPassword('123')
-      const ref = doc(collection(db, 'accounts'))
       const batch = writeBatch(db)
-      batch.set(ref, { username: 'admin', password: hash, displayName: 'Admin', isAdmin: true, isSuperAdmin: false, groupId: '', authEmailVersion: 0, failedAttempts: 0, lockedUntil: null, authEmailScheme: AUTH_SCHEME_ACCOUNT })
-      batch.set(doc(db, 'authIndex', 'admin'), { accountId: ref.id, authEmailVersion: 0, password: hash, failedAttempts: 0, lockedUntil: null, authEmailScheme: AUTH_SCHEME_ACCOUNT })
+      missing.forEach((a) => {
+        const ref = doc(collection(db, 'accounts'))
+        batch.set(ref, { ...a, password: hash, authEmailVersion: 0, failedAttempts: 0, lockedUntil: null, authEmailScheme: AUTH_SCHEME_ACCOUNT })
+        batch.set(doc(db, 'authIndex', a.username), { accountId: ref.id, authEmailVersion: 0, password: hash, failedAttempts: 0, lockedUntil: null, authEmailScheme: AUTH_SCHEME_ACCOUNT })
+      })
       await batch.commit()
     }
-    const groupsSnap = await getDocs(collection(db, 'groups'))
-    if (groupsSnap.empty) {
-      await addDoc(collection(db, 'groups'), { name: 'General' })
-    }
-    const statusesSnap = await getDocs(collection(db, 'statuses'))
-    if (statusesSnap.empty) {
-      await addDoc(collection(db, 'statuses'), { label: 'Present', color: '#34C759', order: 0 })
-      await addDoc(collection(db, 'statuses'), { label: 'Absent', color: '#FF3B30', order: 1 })
-      await addDoc(collection(db, 'statuses'), { label: 'Late', color: '#FF9500', order: 2 })
+    // An `admin` seeded by an earlier build is a HALF-privileged admin — it predates the
+    // single-admin decision and was written with isSuperAdmin false. Left alone it would
+    // put the Dev: Admin button behind a login that cannot see the other platoons, which
+    // reads as a bug in whatever is being tested rather than as stale seed data. Only
+    // ever raises the seeded test account, and only while it is still the seeded one.
+    const seededAdmin = byName.get('admin')
+    if (seededAdmin && seededAdmin.data().isSuperAdmin !== true && seededAdmin.data().displayName === 'Admin') {
+      await setDoc(doc(db, 'accounts', seededAdmin.id), { isAdmin: true, isSuperAdmin: true }, { merge: true })
     }
     // A fresh database gets the whole fixed set; an established one only ever gets the
     // PERMANENT fields back. This runs on every app start, so seeding the pinned pair
@@ -1807,7 +1827,6 @@ export default function App() {
   // arrive in snapshots the admin is already paying for: zero extra reads, and they ride
   // into `attendanceArchive` with the year for free.
   // See ~/.claude/plans/activity-attendance-ict.md.
-  const [attendanceActivities, setAttendanceActivities] = useState({})
   // Which people's status on a day was recorded AFTER that day had passed. There is
   // no way to work this out later — a Present set on the day and one set a week on
   // are identical in the record — so it is stamped at the moment it happens, as a
@@ -1856,7 +1875,6 @@ export default function App() {
   // attendance* maps like the rest of the card: those are keyed by date__group and are
   // blanked when the card isn't today's, and a manifest is normally written the evening
   // before. This carries its own date and is gated on that alone.
-  const [myMovement, setMyMovement] = useState(null)
   // Every seat this person holds, whatever day it is for. `myMovement` above is the one
   // covering TODAY — that is what decides whether the Movement tab exists at all — while
   // the Today board reads this list, because it can be pointed at any date.
@@ -1866,15 +1884,12 @@ export default function App() {
   // card as `frozenOn` — the DATE it applies to rather than a bare boolean, so a card
   // written yesterday cannot lock this morning. Cleared for one man when a super admin
   // reopens him.
-  const [myFrozen, setMyFrozen] = useState(false)
   // Reopened by a super admin. Restores his certificate upload and NOTHING else — the
   // status tiles stay gone for the whole frozen day, reopened or not.
-  const [myReopened, setMyReopened] = useState(false)
   // Today's activity sheets HE is on, off his own card. A member never reads the platoon
   // day document (attendance-self-card-model), so everything he needs about an activity —
   // its name, its venue, whether he is ticked — is written onto his card by whichever
   // admin action put him on the roster. Empty on a day with no activities, which is most.
-  const [myActivities, setMyActivities] = useState([])
   // Which sheet's roster is open, or null for the card list. Held here rather than inside
   // the view because the nav bar swaps the platoon selector for a back chevron and the
   // sheet's name while one is open.
@@ -1890,33 +1905,24 @@ export default function App() {
   // there was one way in; there are two now — the FMC card's row, which makes a company
   // sheet, and the Activities footer, which makes one for the platoon on screen — and the
   // card opens on the scope of whichever was tapped.
-  const [activitySetupScope, setActivitySetupScope] = useState(null)
-  const [activityGear, setActivityGear] = useState(null)
   // The ICT reporting locations — the dated runs, edited from the Today header beside the
   // ICT period they belong to. The DEFAULT company location is not here: it is perpetual,
   // it is what keeps proximity check-in alive outside an ICT, and it lives in Settings at
   // the top of the card holding the saved places it picks from.
-  const [companyLocOpen, setCompanyLocOpen] = useState(false)
-  const [companySchedDraft, setCompanySchedDraft] = useState(null)
-  const [companySchedMsg, setCompanySchedMsg] = useState('')
   // Set when Save is tapped on a period no location covers. It turns the empty line under
   // ICT Reporting Location red — the answer is missing exactly where it would have been
   // printed, so that line is the message, and a second one under the dates would be the
   // same sentence twice.
-  const [ictNeedsLoc, setIctNeedsLoc] = useState(false)
   // The runs as the admin is editing them, not as they are stored. Seeded when the card
   // opens and written only by the card's one Save, so adding, editing and deleting a run are
   // all reversible by backing out — the same as the dates they sit under. A run used to
   // write itself the moment its own form closed, which made half of this card live and the
   // other half a draft.
-  const [ictRuns, setIctRuns] = useState([])
   // The ICT period, edited in the same card. It used to be its own card in Settings, and it
   // was the only half of this setup that lived there — the dates frame the reporting
   // location (proximity check-in runs inside them), so splitting the two across two tabs
   // meant reading half the answer in each. One card, one door, one editor: two editors for
   // one pair of fields is what caused the stale-seed race saveEvent was untangled from.
-  const [ictDraft, setIctDraft] = useState({ from: '', to: '', skipWeekends: false })
-  const [ictMsg, setIctMsg] = useState('')
   // The unmarked filter's pill is in the nav bar and the list it filters is in the body, so
   // the state that joins them has to be here. Add Personnel is the same shape the other way
   // round: the button is up in the bar, the sheet it opens is rendered down in the view.
@@ -1926,26 +1932,17 @@ export default function App() {
   // The two ways into unfreezing, both super-admin-only and both on the Today tab.
   // `unfreezeList` is the banner chip's sheet; `unfreezeOne` is the dialog a locked pill
   // opens, and holds { id, name }.
-  const [unfreezeList, setUnfreezeList] = useState(false)
-  const [unfreezeOne, setUnfreezeOne] = useState(null)
   // The blocked-freeze card. Holds the platoons that are short, and is the ONLY thing the
   // grey chip does — on the ready path the chip just freezes, with no card in between.
-  const [freezeBlockedCard, setFreezeBlockedCard] = useState(null)
-  const [freezing, setFreezing] = useState(false)
   // Armed, waiting for the second tap. Freezing the company is one tap away from being
   // the most consequential thing on the screen — it seals every platoon's morning at
   // once — so it takes the same 3s armed confirm as Mark All and quick-Present rather
   // than firing on contact. The ref is what the handler reads: state alone would give
   // the second tap a stale closure.
-  const [confirmFreezeAll, setConfirmFreezeAll] = useState(false)
   const confirmFreezeAllRef = useRef(false)
   const confirmFreezeAllTimer = useRef(null)
   // Ticked in the list sheet but not yet written — the sheet commits on its button, not
   // per row, so several men can be reopened in one pass.
-  const [unfreezePicks, setUnfreezePicks] = useState([])
-  const [shownFreezeBlocked, freezeBlockedClosing] = useExiting(freezeBlockedCard)
-  const [shownUnfreezeList, unfreezeListClosing] = useExiting(unfreezeList)
-  const [shownUnfreezeOne, unfreezeOneClosing] = useExiting(unfreezeOne)
   // The Vehicle Manifest card, opened from the pill in the day header. It used to be a row
   // in Settings, which meant the one screen that shows a manifest could only send you to
   // another tab to build one - see the Movement tab's empty state, which now opens this.
@@ -1971,9 +1968,7 @@ export default function App() {
   // put while the roll call scrolls. That is why their state sits up here rather than
   // in TodayView: the buttons are outside it now, and the QR sheet they open is shared
   // with the member "Show QR" button still inside it.
-  const [shareLoc, setShareLoc] = useState({ state: 'idle', message: '' })
   const [showQR, setShowQR] = useState(null) // null = closed, 'show' | 'scan' = open in that mode
-  const [shownQR, qrClosing] = useExiting(showQR)
   // Re-renders the toolbar once a minute so the share button's countdown is honest.
   // Local clock only — nothing here reads Firestore.
   const [, setMinuteTick] = useState(0)
@@ -2016,7 +2011,6 @@ export default function App() {
   // Which month the Count tab is showing ('2026-08'). Up here rather than inside
   // HistoryView because the fetch below is keyed to it — the whole point of the month
   // view is that paging the calendar is what decides which documents get read.
-  const [historyMonth, setHistoryMonth] = useState(() => todayISO().slice(0, 7))
   // Which of the merged tab's screens is on top of the day screen.
   //
   //   null           the day screen — the FMC card, the platoon card, the calendar
@@ -2051,8 +2045,6 @@ export default function App() {
   const [copiedReport, setCopiedReport] = useState(false)
   // Which status's company-wide names are open, as a status id. The chips in the All
   // Platoons card open this; the Count tab's own day card has its own single-platoon one.
-  const [companyNames, setCompanyNames] = useState(null)
-  const [shownCompanyNames, companyNamesClosing] = useExiting(companyNames)
   const fetchedAttendanceKeys = useRef(new Set())
   const fetchedMonths = useRef(new Set())
   // Regular users can't read other accounts, so their group's member list comes
@@ -2136,7 +2128,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (localStorage.getItem('vmanifest92_seeded')) { setSeeded(true); return }
+    if (localStorage.getItem('vmanifest92_seeded_v2')) { setSeeded(true); return }
     // The timer only decides when to STOP BLOCKING the login screen — it no longer
     // decides whether the seed worked. A first-ever seed on a cold database is a
     // dozen sequential round trips, and at 10s it routinely outran the timer and
@@ -2153,7 +2145,7 @@ export default function App() {
       // Unconditional: the seed either finished or it did not, and a slow one that
       // finished is still a finished one.
       .then(() => {
-        localStorage.setItem('vmanifest92_seeded', '1')
+        localStorage.setItem('vmanifest92_seeded_v2', '1')
         if (timedOut) setSeedError('')
       })
       .catch((e) => {
@@ -2207,8 +2199,6 @@ export default function App() {
             : query(collection(db, 'accounts'), where('__name__', '==', account.id)),
         (snap) => setAccounts(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
       ),
-      onSnapshot(doc(db, 'settings', 'checkin'), (snap) => { if (snap.exists()) setCheckinSettings(snap.data()) }),
-      onSnapshot(collection(db, 'adminLocations'), (snap) => { const m = {}; snap.docs.forEach((d) => { m[d.id] = d.data() }); setAdminLocations(m) }),
     ]
 
     // Everyone listens, because turning lockdown on signs everyone else out on
@@ -2235,8 +2225,6 @@ export default function App() {
     if (account.isAdmin) {
       unsubs.push(
         onSnapshot(collection(db, 'groups'), (snap) => setGroups(sort(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))),
-        onSnapshot(collection(db, 'statuses'), (snap) => setStatuses(sort(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))),
-        onSnapshot(collection(db, 'locations'), (snap) => { setSavedLocations(sort(snap.docs.map((d) => ({ id: d.id, ...d.data() })))); setLocationsReady(true) }),
         onSnapshot(collection(db, 'groupFields'), (snap) => setGroupFields(sort(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))),
         onSnapshot(collection(db, 'accountFields'), (snap) => setAccountFields(sortAccountFields(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))),
       )
@@ -2344,128 +2332,6 @@ export default function App() {
     )
   }, [lockoutsOpen, account, dayKey])
 
-  // Real-time listener for today's attendance (active group only).
-  // ADMINS ONLY: they're the only ones who see other people's statuses (the roster,
-  // the unmarked count, the status picker are all behind isAdmin). A basic member
-  // reads exactly one line out of this board — their own — so subscribing them to
-  // the whole thing charged every member a read for every other member's change.
-  // They get the self-card listener below instead.
-  //
-  // Skipped entirely while the company-wide listener is up — it already carries this
-  // document, and the same document watched twice is billed twice.
-  useEffect(() => {
-    if (!account?.isAdmin || !activeGroupId || wantsAllPlatoons) return
-    const key = `${todayISO()}__${activeGroupId}`
-    return onSnapshot(doc(db, 'attendance', key), (snap) => {
-      const data = snap.data() || {}
-      setAttendance((prev) => ({ ...prev, [key]: data.entries || {} }))
-      setAttendanceVerifiers((prev) => ({ ...prev, [key]: data.verifiers || {} }))
-      setAttendanceVenues((prev) => ({ ...prev, [key]: data.venues || {} }))
-      setAttendanceDocs((prev) => ({ ...prev, [key]: data.docs || {} }))
-      setAttendanceActivities((prev) => ({ ...prev, [key]: data.activities || {} }))
-      setAttendanceBackdated((prev) => ({ ...prev, [key]: data.backdated || {} }))
-      setAttendanceStamp((prev) => ({ ...prev, [key]: stampOf(data) }))
-    })
-  }, [account, activeGroupId, dayKey, wantsAllPlatoons])
-
-  // Real-time listener for the logged-in admin's OWN group today, so a super admin
-  // viewing another sub-group tab still sees and records their own status correctly.
-  // Off for the same reason as the one above whenever the company-wide listener is up: a
-  // query over every platoon's document for the day necessarily includes his own.
-  useEffect(() => {
-    if (!account?.isAdmin || !account?.groupId || wantsAllPlatoons) return
-    const key = `${todayISO()}__${account.groupId}`
-    return onSnapshot(doc(db, 'attendance', key), (snap) => {
-      const data = snap.data() || {}
-      setAttendance((prev) => ({ ...prev, [key]: data.entries || {} }))
-      setAttendanceVerifiers((prev) => ({ ...prev, [key]: data.verifiers || {} }))
-      setAttendanceVenues((prev) => ({ ...prev, [key]: data.venues || {} }))
-      setAttendanceDocs((prev) => ({ ...prev, [key]: data.docs || {} }))
-      setAttendanceActivities((prev) => ({ ...prev, [key]: data.activities || {} }))
-      setAttendanceBackdated((prev) => ({ ...prev, [key]: data.backdated || {} }))
-      setAttendanceStamp((prev) => ({ ...prev, [key]: stampOf(data) }))
-    })
-  }, [account, dayKey, wantsAllPlatoons])
-
-  // Basic members watch only their OWN card (see mirrorSelfCard) — live updates for
-  // their own status, including when an admin marks them or scans their QR, at one
-  // read per change to THEIR row instead of one per change to anyone's.
-  //
-  // The values are folded into the very same state maps the board listeners fill,
-  // under the same key, so every consumer downstream (myDayRecord[account.id] and
-  // friends) keeps working untouched. A card whose date isn't today is treated as
-  // blank — it's last session's, waiting to be overwritten.
-  //
-  // `until` is what makes a multi-day status (an MC with an end date) survive to the
-  // next morning. The card is written ONCE, on the day it's set, so on day 2 its
-  // `date` is yesterday's and the plain equality check would blank it — the member
-  // would read "Not Recorded Yet" while their admin's board correctly showed MC. With
-  // a range the card stays current until the last day passes, then lapses on its own.
-  // Nothing runs overnight and nothing is rewritten; see saveStatusDoc.
-  useEffect(() => {
-    if (!account || account.isAdmin || !account.groupId) return
-    const today = todayISO()
-    const key = `${today}__${account.groupId}`
-    const put = (setter, value) => setter((prev) => {
-      const next = { ...(prev[key] || {}) }
-      if (value === null || value === undefined) delete next[account.id]
-      else next[account.id] = value
-      return { ...prev, [key]: next }
-    })
-    return onSnapshot(doc(db, 'attendanceSelf', account.id), (snap) => {
-      const card = snap.exists() ? snap.data() : null
-      const live = !!card && (card.date === today || (!!card.until && today >= card.date && today <= card.until))
-      // A day marked in advance rides in `nextDays` so it cannot overwrite the card the
-      // member is reading today; on the morning it names, it becomes the card. The live
-      // card still wins when it is genuinely today's — an admin who marks on the morning
-      // has overruled the plan, and that is the whole point of a roll call.
-      const planned = card && card.nextDays && card.nextDays[today]
-      const d = live ? card : (planned ? { statusId: planned } : {})
-      put(setAttendance, d.statusId ?? null)
-      put(setAttendanceVerifiers, d.verifier ?? null)
-      put(setAttendanceVenues, d.venueId ?? null)
-      put(setAttendanceDocs, d.docMeta ?? null)
-      // Read OUTSIDE the `live` gate above, on its own date test. A manifest is normally
-      // written the evening before, so `card.date` is yesterday's on the morning it
-      // matters — taking this from `d` would blank the one thing the person needs.
-      // A manifest may also run several days, and the card is written once — so this is
-      // a span test, not an equality, exactly like `live` above.
-      //
-      // One seat per manifest, and TODAY decides which one is his. The manifests cannot
-      // share a day — the setup card refuses overlapping dates — so at most one span can
-      // contain today; earliest first is a tie-break that should never be needed.
-      //
-      // `movement` is the pre-mvSeats shape, read as a single seat so a card written by an
-      // older build still shows its man his truck until something rewrites it.
-      // The seat's kind decides which segment of the Movement tab it belongs under. Written
-      // onto the card from now on; for one written before that, the manifest id it is keyed
-      // by says so, and a legacy `movement` has only its party to go on — an activity seat
-      // has none, which is the same test the headings use.
-      const seats = card && card.mvSeats
-        ? Object.entries(card.mvSeats).map(([mvId, x]) => (x ? { ...x, kind: x.kind || (mvId.startsWith('activity__') ? 'activity' : 'outfield') } : null))
-        : (card && card.movement ? [{ ...card.movement, kind: card.movement.kind || (card.movement.party ? 'outfield' : 'activity') }] : [])
-      const held = seats.filter(Boolean).sort((a, b) => (a.date < b.date ? -1 : 1))
-      // Outside the `live` gate for the same reason the seat is: the card may have been
-      // written on an earlier day of a running MC, and the freeze is about TODAY.
-      setMyFrozen(!!card && card.frozenOn === today)
-      setMyReopened(!!card && card.openOn === today)
-      setMySeats(held)
-      setMyMovement(held.find((x) => today >= x.date && today <= (x.until || x.date)) || null)
-      // Also outside the `live` gate, and on its own date test — but for the opposite
-      // reason to the seat above. An activity belongs to ONE day, so the test is plain
-      // equality: yesterday's sheets are yesterday's and tomorrow's are not his problem
-      // yet. The stamp lives on each ITEM rather than on the card, so it cannot be
-      // confused with the card's own `date` — which belongs to his status and may
-      // legitimately be days old on a running MC — and, more to the point, because the
-      // items are written with a merge and one date around all of them would be stamped
-      // forward onto sheets written on an earlier day of the same ICT.
-      const av = card && card.activities
-      setMyActivities(av
-        ? Object.entries(av.items || {}).filter(([, x]) => x && x.date === today)
-          .map(([id, x]) => ({ id, ...x })).sort(sortActivities)
-        : [])
-    })
-  }, [account, dayKey])
 
   // The live outfield vehicle manifest. One document, company-wide, admins only: one
   // read to open and one per change. A day with no manifest still bills the one read,
@@ -2528,239 +2394,6 @@ export default function App() {
     if (other) setMvKind(other)
   }, [movements, mySeats, mvKind, account])
 
-  // A platoon admin's board listener covers today alone, so a manifest built for a day
-  // still to come has no entries to derive its roster from. One document, fetched once,
-  // only when the manifest is open and its day isn't today — and never for a super admin,
-  // whose all-groups listener above already queries the manifest's day.
-  useEffect(() => {
-    if (tab !== 'movement' || !account?.isAdmin || account.isSuperAdmin) return
-    const gid = account.groupId
-    if (!gid || !movementDate || movementDate === todayISO()) return
-    const key = `${movementDate}__${gid}`
-    if (fetchedAttendanceKeys.current.has(key)) return
-    fetchedAttendanceKeys.current.add(key)
-    getDoc(doc(db, 'attendance', key)).then((snap) => {
-      const data = snap.exists() ? snap.data() : {}
-      setAttendance((prev) => ({ ...prev, [key]: data.entries || {} }))
-    })
-  }, [tab, account, movementDate, dayKey])
-
-  // Fetch a specific past date's attendance on demand (Today tab date nav).
-  //
-  // The company-wide listener only ever watches TODAY, so on a past day the platoon either
-  // side of the one on screen has nothing — and the swipe would peek at a board reading as
-  // though nobody had been marked, which on this screen is the worst thing it could say. So
-  // the two neighbours are fetched with it: two documents, only on a day actually paged
-  // back to, and only for a super admin who can swipe. The key cache is shared with the
-  // Count tab's fan-out, so a day already opened there costs nothing here.
-  useEffect(() => {
-    if (!account || !activeGroupId || selectedDate === todayISO()) return
-    const idx = groups.findIndex((g) => g.id === activeGroupId)
-    const wanted = [activeGroupId]
-    if (account.isSuperAdmin && idx >= 0) {
-      if (groups[idx - 1]) wanted.push(groups[idx - 1].id)
-      if (groups[idx + 1]) wanted.push(groups[idx + 1].id)
-    }
-    wanted.forEach((gid) => {
-      const key = `${selectedDate}__${gid}`
-      if (fetchedAttendanceKeys.current.has(key)) return
-      fetchedAttendanceKeys.current.add(key)
-      getDoc(doc(db, 'attendance', key)).then((snap) => {
-        const data = snap.exists() ? snap.data() : {}
-        setAttendance((prev) => ({ ...prev, [key]: data.entries || {} }))
-        setAttendanceVerifiers((prev) => ({ ...prev, [key]: data.verifiers || {} }))
-        setAttendanceVenues((prev) => ({ ...prev, [key]: data.venues || {} }))
-        setAttendanceDocs((prev) => ({ ...prev, [key]: data.docs || {} }))
-        setAttendanceActivities((prev) => ({ ...prev, [key]: data.activities || {} }))
-        setAttendanceBackdated((prev) => ({ ...prev, [key]: data.backdated || {} }))
-        setAttendanceStamp((prev) => ({ ...prev, [key]: stampOf(data) }))
-      }).catch(() => { fetchedAttendanceKeys.current.delete(key) })
-    })
-  }, [selectedDate, activeGroupId, account, groups])
-
-  // Count tab: the month being viewed, and only that month. This was every attendance
-  // document the platoon had ever had, re-read on every visit to the tab — a number that
-  // grew by one per roll call and never came back down. A month is ~22 documents whatever
-  // year it is. Cached per month + platoon for the session, so paging back and forth
-  // through the calendar costs nothing after the first look.
-  // '-31' is safe as an upper bound: these are string comparisons, and no date in the
-  // month sorts above it.
-  //
-  // The platoon on screen, and — for a super admin, who can swipe between them — the two
-  // either side, so a page sliding in under his finger carries its own month rather than a
-  // grid of empty squares. Cached the same way, so swiping across the company costs what
-  // tapping the pills costs; the only reads this adds are a neighbour nobody ends up
-  // visiting, and only once per month per session.
-  useEffect(() => {
-    // The company screen only. A board has no calendar on it, so nothing there is asking
-    // for a month.
-    if (tab !== 'today' || openScreen || !account?.isAdmin || !activeGroupId) return
-    const idx = groups.findIndex((g) => g.id === activeGroupId)
-    const wanted = [activeGroupId]
-    if (account.isSuperAdmin && idx >= 0) {
-      if (groups[idx - 1]) wanted.push(groups[idx - 1].id)
-      if (groups[idx + 1]) wanted.push(groups[idx + 1].id)
-    }
-    wanted.forEach((gid) => {
-      const key = `${historyMonth}__${gid}`
-      if (fetchedMonths.current.has(key)) return
-      fetchedMonths.current.add(key)
-      getDocs(query(
-        collection(db, 'attendance'),
-        where('groupId', '==', gid),
-        where('date', '>=', `${historyMonth}-01`),
-        where('date', '<=', `${historyMonth}-31`),
-      )).then((snap) => {
-        const entriesMap = {}
-        const verifiersMap = {}
-        const stampMap = {}
-        snap.docs.forEach((d) => {
-          const data = d.data()
-          entriesMap[d.id] = data.entries || {}
-          verifiersMap[d.id] = data.verifiers || {}
-          stampMap[d.id] = stampOf(data)
-        })
-        setAttendance((prev) => ({ ...prev, ...entriesMap }))
-        setAttendanceVerifiers((prev) => ({ ...prev, ...verifiersMap }))
-        setAttendanceStamp((prev) => ({ ...prev, ...stampMap }))
-      }).catch(() => { fetchedMonths.current.delete(key) })
-    })
-  }, [tab, openScreen, activeGroupId, account, historyMonth, groups])
-
-  // Super admins on the Count tab: load today's attendance for EVERY group in one
-  // query so the All Groups summary is accurate without clicking through each tab.
-  //
-  // The Movement tab needs the same data for the same reason — its roster spans the
-  // whole company, because a vehicle mixes platoons. Widened rather than duplicated:
-  // it is the identical query, and a second listener would double the reads for a
-  // super admin who visits both tabs.
-  //
-  // On the Movement tab the day is the MANIFEST's, not today — that is the board its
-  // roster is derived from. On the 364 days the two are the same string the subscription
-  // never changes, so switching between the tabs still costs nothing.
-  //
-  // TODAY is on the list too, so the platoon either side of the one on screen is drawn from
-  // the same live data as the one in the middle. A one-shot fetch per neighbour was tried
-  // and pulled back out: it saved little and it made a peek show a picture that could be
-  // minutes old, which on the roll-call screen is worse than the reads are worth. What you
-  // see under your thumb is what is on the board right now.
-  //
-  // The dependency is the WANT and the DATE, not the tab. All three tabs ask for the same
-  // day (bar a manifest planned ahead), so moving between them keeps ONE subscription
-  // instead of tearing it down and paying for five documents again on the way back — which
-  // is most of what the one-shot version would have saved anyway.
-  useEffect(() => {
-    if (!wantsAllPlatoons) return
-    const today = allPlatoonsDate
-    return onSnapshot(query(collection(db, 'attendance'), where('date', '==', today)), (snap) => {
-      const entriesMap = {}
-      const verifiersMap = {}
-      const stampMap = {}
-      // `activities` and `docs` come down inside these same documents whether we keep them
-      // or not — the read is already billed, and dropping the fields only meant asking for
-      // them again later. Kept, the Activity tab's swipe can draw the platoon either side
-      // of the one on screen without a single extra read. See SwipePages.
-      const activitiesMap = {}
-      const docsMap = {}
-      // `venues` and `backdated` for the same reason, and for the Today swipe: a neighbour
-      // platoon's board needs everything the board on screen needs, and every one of these
-      // fields arrived inside a document that has already been paid for.
-      const venuesMap = {}
-      const backdatedMap = {}
-      snap.docs.forEach((d) => {
-        const data = d.data()
-        entriesMap[d.id] = data.entries || {}
-        verifiersMap[d.id] = data.verifiers || {}
-        stampMap[d.id] = stampOf(data)
-        activitiesMap[d.id] = data.activities || {}
-        docsMap[d.id] = data.docs || {}
-        venuesMap[d.id] = data.venues || {}
-        backdatedMap[d.id] = data.backdated || {}
-      })
-      setAttendance((prev) => ({ ...prev, ...entriesMap }))
-      setAttendanceVerifiers((prev) => ({ ...prev, ...verifiersMap }))
-      setAttendanceStamp((prev) => ({ ...prev, ...stampMap }))
-      setAttendanceActivities((prev) => ({ ...prev, ...activitiesMap }))
-      setAttendanceDocs((prev) => ({ ...prev, ...docsMap }))
-      setAttendanceVenues((prev) => ({ ...prev, ...venuesMap }))
-      setAttendanceBackdated((prev) => ({ ...prev, ...backdatedMap }))
-    })
-  }, [wantsAllPlatoons, allPlatoonsDate])
-
-  // The listener above only covers today. Tapping a past day on the calendar has to fill
-  // in the OTHER platoons for that one date, or the All Platoons card would count the
-  // platoon you happen to be on and score the rest as unmarked.
-  //
-  // Fetched by document id, not by a date query: the id is `${date}__${groupId}`, so this
-  // is two reads for a three-platoon company however big the month is — and cached for
-  // the session, so paging back and forth over the same days is free. The active
-  // platoon's own document already arrived with the month.
-  useEffect(() => {
-    if (tab !== 'today' || openScreen || !account?.isSuperAdmin) return
-    if (selectedDate === todayISO()) return
-    groups.forEach((g) => {
-      if (!g.id || g.id === activeGroupId) return
-      const key = `${selectedDate}__${g.id}`
-      if (fetchedAttendanceKeys.current.has(key)) return
-      fetchedAttendanceKeys.current.add(key)
-      getDoc(doc(db, 'attendance', key)).then((snap) => {
-        setAttendance((prev) => ({ ...prev, [key]: (snap.exists() ? snap.data().entries : {}) || {} }))
-      }).catch(() => { fetchedAttendanceKeys.current.delete(key) })
-    })
-  }, [tab, openScreen, account, groups, activeGroupId, selectedDate])
-
-  // The names of personnel whose accounts have been deleted. Only the Count tab
-  // needs them — a past day's status expands into names, and anyone since removed
-  // has to still resolve or the count and the list disagree. One document, read
-  // once per session on first opening the tab: one billed read, never repeated,
-  // and nothing at all for an admin who never opens Count.
-  useEffect(() => {
-    // The Today board needs these too, from the moment it looks at a past day: a man who
-    // has since left the platoon is on that day's record but not in `accounts`, and a
-    // basic admin only ever holds his own platoon's accounts.
-    if (!account?.isAdmin || formerNamesLoaded.current) return
-    // One tab now, and every admin on it can reach a past day's names — off the calendar,
-    // off the company card's chips, off a board. One read, once per session.
-    if (tab !== 'today') return
-    formerNamesLoaded.current = true
-    getDoc(doc(db, 'formerMembers', 'index'))
-      .then((snap) => { if (snap.exists()) setFormerNames(snap.data() || {}) })
-      // Left empty on failure: unresolved names fall back to "Former personnel",
-      // so the count still adds up. Retrying would cost a read per attempt.
-      .catch(() => {})
-  }, [tab, account, selectedDate])
-
-  // Auto-archive previous years' attendance when a super admin opens the app.
-  // The manual Archive Attendance card is only a backup for anything missed here.
-  useEffect(() => {
-    if (!account?.isSuperAdmin) return
-    const currentYear = new Date().getFullYear()
-    getDocs(collection(db, 'attendance')).then(async (snap) => {
-      const prevYears = new Set()
-      snap.docs.forEach((d) => {
-        const year = parseInt(d.id.slice(0, 4), 10)
-        if (!isNaN(year) && year < currentYear) prevYears.add(year)
-      })
-      if (prevYears.size === 0) return
-      for (const year of prevYears) {
-        await archiveYearDocs(snap.docs.filter((d) => d.id.startsWith(`${year}-`)), year)
-      }
-      setAttendance({})
-      setAttendanceVerifiers({})
-      setAttendanceVenues({})
-      setAttendanceActivities({})
-      // The freeze flag rides in this map too, so an archived year must not leave a
-      // frozen day in memory with no document behind it.
-      setAttendanceStamp({})
-      fetchedAttendanceKeys.current.clear()
-    })
-  }, [account])
-
-  useEffect(() => {
-    if (!account) return
-    if (!account.isSuperAdmin && account.groupId) { setActiveGroupId(account.groupId); setGroupTabGroupId(account.groupId) }
-    else if (account.isAdmin && !activeGroupId && groups.length) { setActiveGroupId(groups[0].id); setGroupTabGroupId(groups[0].id) }
-  }, [account, groups, activeGroupId])
 
   // Admins keep the names-only rosters/{groupId} mirror in sync from the accounts
   // they can see (basic admin → own group; super admin → all groups). Reconciled
@@ -3056,7 +2689,7 @@ export default function App() {
     // accounts collection, which is unreadable to an unauthenticated visitor
     // once the read lockdown is in place. loginWithCredentials only reads the
     // public authIndex pre-auth, so this keeps working after lockdown.
-    const DEV_ACCOUNTS = { superAdmin: 'admin', admin: 'admin', user: 'admin' }
+    const DEV_ACCOUNTS = { admin: 'admin', user: 'user' }
     const username = DEV_ACCOUNTS[role]
     if (!username) { console.warn(`devLogin: no test account mapped for ${role}`); return false }
     try {
@@ -3067,83 +2700,12 @@ export default function App() {
     } catch (e) { console.warn('devLogin error', e); return false }
   }
 
-  // Per-person mirror of TODAY's own attendance — one small doc per member, keyed
-  // by account alone, so it's overwritten each morning and never accumulates.
-  //
-  // Why it exists: attendance is one document per platoon per day, and Firestore
-  // can only hand out whole documents. A basic member who only wants their own
-  // status had to subscribe to the entire platoon board, which bills them a read
-  // every time ANY teammate changes anything — N members each paying N reads at
-  // muster, so the cost squares with platoon size. Admins genuinely need the whole
-  // board; a member needs one line of it. See the self-card listener below.
-  //
-  // Always added to the SAME batch as the board write, so the two can never
-  // disagree. Only today is mirrored: editing a past date must not clobber a card
-  // that represents today.
-  // `until`/`docMeta` default to null on EVERY mirror, not just when a caller thinks
-  // to clear them. Each of these writers sets a single-day status, so a range left
-  // over from a previous MC would otherwise survive the merge and keep the card
-  // reading as live days after the status changed. saveStatusDoc writes its own card.
-  // A member reads ONE card, and it holds ONE day — so a day marked in advance cannot be
-  // written as the card without wiping the status the member is reading right now. It goes
-  // into `nextDays` instead, keyed by its own date, and the member's listener promotes it
-  // on the morning it names (see the attendanceSelf listener).
-  //
-  // Without this a pre-marked man's phone says nothing on the day while the admin's board
-  // says Outfield — and the board, being already marked, gives the admin no reason to
-  // touch it. That gap is not new: setDaysAhead has always written days 2..n to the board
-  // alone.
-  //
-  // A past day still writes nothing. A back-dated certificate marks days that are already
-  // history; the card describes today.
-  function mirrorSelfCard(batch, date, groupId, accountId, patch) {
-    const today = todayISO()
-    if (date < today) return
-    const ref = doc(db, 'attendanceSelf', accountId)
-    if (date > today) {
-      batch.set(ref, { nextDays: { [date]: patch.statusId || deleteField() } }, { merge: true })
-      return
-    }
-    // Today's own pre-mark is spent the moment a real card is written for today, so it
-    // is cleared in the same write rather than left to linger.
-    batch.set(ref, { date, groupId, until: null, docMeta: null, nextDays: { [date]: deleteField() }, ...patch }, { merge: true })
-  }
 
   // ---- Outfield vehicle manifest -------------------------------------------
   // A manifest is a PLAN, not a record: it says where people are supposed to be. It
   // never touches the daily roll call, a status, or a certificate — so it needs no
   // part of the attendance rules, pastDayOK(), or the freeze.
 
-  // The member's own seat, mirrored onto the card they already listen to so they cost
-  // no extra reads. Deliberately NOT mirrorSelfCard: that one resets `until` and
-  // `docMeta` (wiping a member's MC card) and drops any write whose date isn't today,
-  // which is every manifest built the evening before. Touches `movement` and nothing
-  // else. Pass null to clear.
-  // Keyed by manifest, because a man can hold a seat on more than one: the outfield this
-  // week and the range next week are both his, and neither is wrong. A single `movement`
-  // field made the second assignment overwrite the first, and since the card only shows
-  // while today is inside ITS OWN dates, the man whose seat had been overwritten saw
-  // nothing at all on the morning of the other one — while the admin's manifest, and every
-  // crew mate's card, still listed him. Silent, and only ever visible to him.
-  //
-  // `movement` is cleared on every write. It could only ever hold one seat, so a card
-  // carrying it has already lost any second one; dropping it takes away nothing that was
-  // not already gone, and stops a stale seat outliving the manifest it came from.
-  // The freeze, mirrored onto the member's own card. Deliberately NOT mirrorSelfCard,
-  // for exactly the reason spelled out above it: that writer clears `until` and
-  // `docMeta` on every call, so routing one boolean through it would wipe the MC card
-  // off the phone of every man on a running certificate. Touches `frozenOn` and nothing
-  // else. Pass null to reopen him.
-  // TWO dates, not one flag. `frozenOn` says the day is frozen and stays set even after
-  // he is reopened, because reopening restores exactly one thing for him — his certificate
-  // upload — and never his own status tiles. `openOn` is that exemption. Both are dates
-  // rather than booleans so a card written yesterday cannot govern this morning.
-  function mirrorSelfFreeze(batch, accountId, iso, open) {
-    batch.set(doc(db, 'attendanceSelf', accountId), {
-      frozenOn: iso || deleteField(),
-      openOn: iso && open ? iso : deleteField(),
-    }, { merge: true })
-  }
 
   function mirrorSelfMovement(batch, accountId, mvId, seat) {
     batch.set(doc(db, 'attendanceSelf', accountId), { mvSeats: { [mvId]: seat || deleteField() }, movement: deleteField() }, { merge: true })
@@ -3469,419 +3031,23 @@ export default function App() {
     return api
   }
 
-  // The member's mirror. Deliberately NOT mirrorSelfCard — that writer resets `until` and
-  // `docMeta` on every call, so pushing an activity through it on day 3 of a five-day MC
-  // would blank the card he is reading and leave his own Today tab saying "Not Recorded
-  // Yet" while the platoon board still correctly showed MC. Rule 2 makes that a real path,
-  // not a hypothetical: adding a man who is off for the day to the night roll call is
-  // exactly the case. This touches `activities` and nothing else.
-  //
-  // The date lives INSIDE the field rather than on the card, because the card's own `date`
-  // belongs to his status and is legitimately days old on a running certificate.
-  // Pass deleteField() as an item's value to take one sheet off his card.
-  // A PAST day is never mirrored — the card describes today or a day still to come, the
-  // same rule mirrorSelfCard follows. Tomorrow IS mirrored, and that is a fix: this read
-  // `date !== todayISO()`, so a sheet created the evening before wrote nothing to anybody's
-  // phone. It healed on the morning only because taking the roll call rewrites the card —
-  // and a platoon marked in advance never gets that rewrite, so its members reached the day
-  // with no Activity tab at all while the admin's board showed a full roster.
-  //
-  // Writing ahead is only safe because each item carries its own date (see below), so
-  // tomorrow's sits inert in the card until tomorrow.
-  function mirrorSelfActivities(batch, date, accountId, items) {
-    if (date < todayISO()) return
-    batch.set(doc(db, 'attendanceSelf', accountId), { activities: { items } }, { merge: true })
-  }
 
-  // What the member's card carries for one sheet. He cannot read `attendance/` at all
-  // (attendance-self-card-model), so everything his own tab shows has to be written here.
-  //
-  // The DATE rides on the ITEM, not on the `activities` map around it. It has to: this is a
-  // merge, and Firestore merges a nested map rather than replacing it — so one date for the
-  // whole map was stamped forward onto items written days earlier, and day two of an ICT
-  // showed day one's sheets, still ticked, beside its own. Per item, the reader keeps
-  // today's and ignores the rest. The leftovers are a few dozen bytes each and never shown.
-  function activityCardItem(date, act, present) {
-    return { date, name: act.name || '', locationId: act.locationId || null, order: typeof act.order === 'number' ? act.order : null, present: !!present }
-  }
 
-  // Which platoons a sheet exists in. A company-scoped one is DUPLICATED into every
-  // platoon's day document under a single shared id — the same denormalisation the ICT
-  // event dates already use — because there is no company-wide document to hang it on and
-  // inventing one would cost every admin an extra read on every day of the year.
-  function activityGroupIds(scope, groupId) {
-    return scope === 'company' ? groups.map((g) => g.id) : [groupId]
-  }
 
-  // Today's sheets for one platoon, in display order.
-  function activitiesFor(date, groupId) {
-    const map = attendanceActivities[`${date}__${groupId}`] || {}
-    return Object.entries(map).map(([id, x]) => ({ id, ...x })).sort(sortActivities)
-  }
 
-  // Who is on a sheet's roster: everyone ON PARADE in that platoon that day, plus anyone
-  // an admin put there by hand. DERIVED on every read, never stored — which is what makes
-  // a sheet created before the morning roll call start empty and fill as people are
-  // marked. Correct, but it reads as a bug the first time, so the empty state says so.
-  function rosterFrom(date, groupId, entries, act) {
-    const here = onParadeIds(statuses)
-    const added = (act && act.added) || {}
-    return accounts.filter((a) => (a.groupId || '') === groupId && activeOn(a, date)
-      && (here.has(entries[a.id]) || added[a.id]))
-  }
 
-  // The same thing for the platoon on screen, whose day document is already in memory.
-  function activityRoster(date, groupId, act) {
-    return rosterFrom(date, groupId, attendance[`${date}__${groupId}`] || {}, act)
-  }
 
-  // Every platoon a write has to reach, READ STRAIGHT FROM FIRESTORE rather than taken from
-  // the two day documents that happen to be in memory.
-  //
-  // This is not an optimisation, it is the fix for a silent one. A company sheet lives in
-  // five platoon documents; an admin listens to two. Driving the fan-out off
-  // `attendanceActivities` meant create seeded member cards in two platoons, and rename and
-  // delete skipped three platoons outright and reported success — exactly the
-  // "company-scope drift" this plan lists as a risk, in all three writers at once.
-  //
-  // Each platoon's own `entries` comes back with it, which is what says who is on parade
-  // there — a roster cannot be derived from another platoon's morning.
-  //
-  // The cost is one read per platoon, and only on create / rename / delete. Those are
-  // typed by an admin a handful of times an ICT; marking, which happens all day, still
-  // touches nothing but the document already open.
-  async function activityTargets(date, scope, groupId) {
-    const gids = activityGroupIds(scope, groupId).filter(canWriteGroup)
-    const snaps = await Promise.all(gids.map((g) => getDoc(doc(db, 'attendance', `${date}__${g}`))))
-    return gids.map((gid, i) => {
-      const d = snaps[i].exists() ? snaps[i].data() : {}
-      return { gid, entries: d.entries || {}, activities: d.activities || {} }
-    })
-  }
 
-  // The day document may not exist yet — a sheet can be the first thing written to a day —
-  // so every write carries the fields the rules match on. dayStamp() is the safe way to
-  // reach the roster stamp: it returns null on a frozen day, and hand-building the payload
-  // instead would trip rosterUnchanged() and take the whole batch down with it.
-  function activityDayPayload(date, groupId, activities) {
-    return { activities, groupId, date, year: parseInt(date.slice(0, 4), 10), ...(dayStamp(date, groupId) || {}) }
-  }
 
-  // Fold a fan-out write into the platoons NOBODY IS LISTENING TO.
-  //
-  // On this tab a super admin holds one subscription, on `activeGroupId` alone —
-  // `wantsAllPlatoons` covers Today and Movement and deliberately not this one, to keep the
-  // read count at one document instead of five. So a company-scoped write lands in all five
-  // documents in Firestore while only the active platoon's listener hears about it, and the
-  // other four keep whatever `attendanceActivities` cached the last time you looked at them.
-  //
-  // Swipe to one of them and the page renders from that stale copy for the frame or two
-  // before the re-pointed subscription delivers: a sheet you just created is missing and the
-  // screen says "No Activity Attendance created yet", a sheet you just deleted is still on screen.
-  // Then it corrects itself, which is worse than being wrong — it reads as the app changing
-  // its mind.
-  //
-  // Free to fix, because activityTargets has already read every target document to build the
-  // batch: `activities` on each target IS that platoon's whole map as of a moment ago, so the
-  // next map is computable without a single extra read. Called only AFTER the commit lands,
-  // so a refused write leaves the cache alone.
-  function patchLocalActivities(date, entriesByGid) {
-    setAttendanceActivities((prev) => {
-      const next = { ...prev }
-      entriesByGid.forEach(([gid, map]) => { next[`${date}__${gid}`] = map })
-      return next
-    })
-  }
 
-  // The same fix, one leaf down, for the day NOBODY IS LISTENING TO.
-  //
-  // Live subscriptions cover today and nothing else — a past day is fetched once with
-  // getDoc and cached under `fetchedAttendanceKeys`, deliberately, because a listener per
-  // day browsed is a read per day browsed. That is right, and it left a hole: ticking a man
-  // on a past sheet wrote to Firestore and came back to a screen with no listener to hear
-  // it, so the pill stayed grey and the count stayed put. The mark WAS saved — it appeared
-  // on the next visit — which is the worst version of the bug, because it reads as the tap
-  // having done nothing and invites it to be done again.
-  //
-  // The daily board never had this: every one of its writers already patches `attendance`
-  // by hand for exactly this reason. The activity writers were the four that did not.
-  //
-  // `leaves` is { entries | added | verifiers | venues: { accountId: value } }, and a null
-  // value deletes that key — mirroring deleteField() in the batch above it. Called only
-  // AFTER the commit lands, so a refused write leaves the cache alone. A no-op when the
-  // sheet is not cached: there is nothing on screen to correct.
-  function patchLocalActivityLeaves(date, groupId, actId, leaves) {
-    const key = `${date}__${groupId}`
-    setAttendanceActivities((prev) => {
-      const day = prev[key]
-      if (!day || !day[actId]) return prev
-      const act = { ...day[actId] }
-      Object.entries(leaves).forEach(([field, changes]) => {
-        const map = { ...(act[field] || {}) }
-        Object.entries(changes).forEach(([id, v]) => { if (v === null) delete map[id]; else map[id] = v })
-        act[field] = map
-      })
-      return { ...prev, [key]: { ...day, [actId]: act } }
-    })
-  }
 
-  async function addActivity({ date, groupId, name, locationId, scope }) {
-    const id = genActivityId()
-    const targets = await activityTargets(date, scope, groupId)
-    if (!targets.length) return null
-    const act = { name: name.trim(), locationId, scope, createdAt: Date.now(), createdBy: account.id }
-    try {
-      const batch = chunkedBatch()
-      const local = []
-      targets.forEach(({ gid, entries, activities }) => {
-        // Sorts to the end of whatever that platoon already has. Counted per platoon, so
-        // a company sheet can sit third in one and first in another — each platoon runs
-        // its own day and orders its own sheets.
-        const withOrder = { ...act, order: Object.keys(activities).length }
-        local.push([gid, { ...activities, [id]: withOrder }])
-        batch.set(doc(db, 'attendance', `${date}__${gid}`), activityDayPayload(date, gid, { [id]: withOrder }), { merge: true })
-        rosterFrom(date, gid, entries, null).forEach((a) => mirrorSelfActivities(batch, date, a.id, { [id]: activityCardItem(date, withOrder, false) }))
-      })
-      await batch.commit()
-      patchLocalActivities(date, local)
-    } catch (e) { console.warn('addActivity', e); return null }
-    return id
-  }
 
-  // `groupId` is a PARAMETER, not `act.groupId`. A stored activity is
-  // { name, locationId, scope, createdAt, createdBy, order } and has never carried the
-  // platoon it belongs to — it does not need to, because it is a field ON that platoon's
-  // day document. So `act.groupId` was always undefined, and for a PLATOON-scoped sheet
-  // that made activityTargets look up `attendance/{date}__undefined`: a real path, so no
-  // throw; a missing document, so `activities` came back empty; `cur` undefined, so the
-  // forEach returned without queueing a write. Save and Delete did nothing at all, in
-  // silence. Company sheets were fine throughout — activityGroupIds ignores the argument
-  // for them and returns every platoon.
-  //
-  // Passed in rather than stored on the sheet: the screen always knows which platoon it is
-  // showing, and adding the field would fix new sheets while leaving every existing one
-  // broken. Same shape as setActivityPresence, which takes its groupId this way already.
-  async function renameActivity(date, groupId, act, patch) {
-    const targets = await activityTargets(date, act.scope, groupId)
-    try {
-      const batch = chunkedBatch()
-      const local = []
-      targets.forEach(({ gid, entries, activities }) => {
-        const cur = activities[act.id]
-        if (!cur) return
-        const next = { ...cur, ...patch }
-        local.push([gid, { ...activities, [act.id]: next }])
-        batch.set(doc(db, 'attendance', `${date}__${gid}`), activityDayPayload(date, gid, { [act.id]: patch }), { merge: true })
-        // Every man on the roster carries the name and the venue on his own card, so a
-        // rename that stopped at the day document would leave the whole platoon reading
-        // the old one. Same reason a company rename has to fan out at all.
-        rosterFrom(date, gid, entries, cur).forEach((a) =>
-          mirrorSelfActivities(batch, date, a.id, { [act.id]: activityCardItem(date, next, (cur.entries || {})[a.id]) }))
-      })
-      await batch.commit()
-      patchLocalActivities(date, local)
-    } catch (e) { console.warn('renameActivity', e); return false }
-    return true
-  }
 
-  // The marks live inside the sheet, so deleting one destroys its attendance with it and
-  // Firestore has no undo. The arm-and-confirm and the count of what is about to go are
-  // in the UI; by the time this runs the decision is made.
-  async function removeActivity(date, groupId, act) {
-    const targets = await activityTargets(date, act.scope, groupId)
-    try {
-      const batch = chunkedBatch()
-      const local = []
-      targets.forEach(({ gid, entries, activities }) => {
-        const cur = activities[act.id]
-        if (!cur) return
-        const rest = { ...activities }
-        delete rest[act.id]
-        local.push([gid, rest])
-        batch.update(doc(db, 'attendance', `${date}__${gid}`), { [`activities.${act.id}`]: deleteField() })
-        rosterFrom(date, gid, entries, cur).forEach((a) => mirrorSelfActivities(batch, date, a.id, { [act.id]: deleteField() }))
-      })
-      await batch.commit()
-      patchLocalActivities(date, local)
-    } catch (e) { console.warn('removeActivity', e); return false }
-    return true
-  }
 
-  // One tick. A DOTTED field path, so two admins marking two different men touch two
-  // different leaves and neither can clobber the other — safer than the daily board's
-  // read-modify-write of the whole entries map.
-  async function setActivityPresence(date, groupId, act, accountId, present, extra) {
-    if (!canWriteGroup(groupId)) return
-    try {
-      const batch = writeBatch(db)
-      const upd = { [`activities.${act.id}.entries.${accountId}`]: present ? true : deleteField() }
-      // Stamped the same way and for the same reason as the daily board's: a tick put on a
-      // day already gone is a super admin's own say-so, not something a sheet recorded at
-      // the time, and the row says so with the same clock.
-      //
-      // CLEARING stamps it too. Taking a man's Present back on a past day is the same kind
-      // of act as putting it there — somebody decided, after the fact, that the sheet was
-      // wrong — and it is the more surprising of the two to find later, because the row it
-      // leaves behind looks exactly like a man who was simply never marked. The clock is
-      // what separates "never ticked" from "ticked, then untucked by hand a week later".
-      // Only wiped on TODAY, so marking a man on the day itself never leaves an old stamp
-      // standing; the add being taken back wipes it too, over in addToActivity, because
-      // that removes the row and there is nothing left to date.
-      upd[`activities.${act.id}.backdated.${accountId}`] = date < todayISO() ? true : deleteField()
-      if (extra && extra.verifier) upd[`activities.${act.id}.verifiers.${accountId}`] = extra.verifier
-      if (extra && extra.venueId) upd[`activities.${act.id}.venues.${accountId}`] = extra.venueId
-      // A man not on the day's roster is put on it in the same write that ticks him —
-      // the QR path at the door, where making the admin cancel, find the name in a picker
-      // and scan again is ceremony in the middle of a queue.
-      if (present && extra && extra.add) {
-        upd[`activities.${act.id}.added.${accountId}`] = true
-        if (date < todayISO()) upd[`activities.${act.id}.addedLate.${accountId}`] = true
-      }
-      batch.update(doc(db, 'attendance', `${date}__${groupId}`), upd)
-      mirrorSelfActivities(batch, date, accountId, { [act.id]: activityCardItem(date, act, present) })
-      await batch.commit()
-      const leaves = { entries: { [accountId]: present ? true : null },
-        backdated: { [accountId]: date < todayISO() ? true : null } }
-      if (extra && extra.verifier) leaves.verifiers = { [accountId]: extra.verifier }
-      if (extra && extra.venueId) leaves.venues = { [accountId]: extra.venueId }
-      if (present && extra && extra.add) {
-        leaves.added = { [accountId]: true }
-        if (date < todayISO()) leaves.addedLate = { [accountId]: true }
-      }
-      patchLocalActivityLeaves(date, groupId, act.id, leaves)
-    } catch (e) { console.warn('setActivityPresence', e); return false }
-    return true
-  }
 
-  async function markAllActivityPresent(date, groupId, act, accountIds) {
-    if (!canWriteGroup(groupId) || !accountIds.length) return
-    try {
-      const batch = chunkedBatch()
-      const upd = {}
-      accountIds.forEach((id) => { upd[`activities.${act.id}.entries.${id}`] = true })
-      // Mark All on a past day backdates every man it touches, exactly as the daily board's
-      // does. On today it writes nothing rather than a map of deletes for rows that have no
-      // stamp to clear.
-      if (date < todayISO()) accountIds.forEach((id) => { upd[`activities.${act.id}.backdated.${id}`] = true })
-      batch.update(doc(db, 'attendance', `${date}__${groupId}`), upd)
-      accountIds.forEach((id) => mirrorSelfActivities(batch, date, id, { [act.id]: activityCardItem(date, act, true) }))
-      await batch.commit()
-      patchLocalActivityLeaves(date, groupId, act.id, {
-        entries: Object.fromEntries(accountIds.map((id) => [id, true])),
-        ...(date < todayISO() ? { backdated: Object.fromEntries(accountIds.map((id) => [id, true])) } : {}),
-      })
-    } catch (e) { console.warn('markAllActivityPresent', e); return false }
-    return true
-  }
 
-  // Rule 2: an admin puts a man who is off for the day onto ONE sheet. His daily status is
-  // not touched and never will be — he stays off for the day AND is on the night roll call.
-  // Select All on the Add Personnel sheet. One pass rather than a commit per man: the day
-  // document is a SINGLE write however many names go into it, so looping addToActivity was
-  // paying (N-1) day-document writes for nothing. The cards are still one write each —
-  // they are separate documents and nothing can change that. chunkedBatch keeps it honest
-  // if a roster ever ran past Firestore's 500-op batch cap.
-  //
-  // Adding only. There is no Deselect All, because taking a man off is the one direction
-  // that can destroy work: `addToActivity(..., false)` also deletes his tick, and a pill
-  // that wipes a roster's attendance in one tap is not worth the taps it saves.
-  async function addManyToActivity(date, groupId, act, accountIds) {
-    if (!canWriteGroup(groupId) || !accountIds.length) return false
-    try {
-      const batch = chunkedBatch()
-      const upd = {}
-      accountIds.forEach((id) => {
-        upd[`activities.${act.id}.added.${id}`] = true
-        if (date < todayISO()) upd[`activities.${act.id}.addedLate.${id}`] = true
-        mirrorSelfActivities(batch, date, id, { [act.id]: activityCardItem(date, act, false) })
-      })
-      batch.update(doc(db, 'attendance', `${date}__${groupId}`), upd)
-      await batch.commit()
-      patchLocalActivityLeaves(date, groupId, act.id, {
-        added: Object.fromEntries(accountIds.map((id) => [id, true])),
-        ...(date < todayISO() ? { addedLate: Object.fromEntries(accountIds.map((id) => [id, true])) } : {}),
-      })
-    } catch (e) { console.warn('addManyToActivity', e); return false }
-    return true
-  }
 
-  async function addToActivity(date, groupId, act, accountId, on) {
-    if (!canWriteGroup(groupId)) return
-    try {
-      const batch = writeBatch(db)
-      const upd = { [`activities.${act.id}.added.${accountId}`]: on ? true : deleteField() }
-      // WHEN he was put on the roster, stamped rather than worked out at render time. "Is
-      // this a past day" is true of every day eventually, so a man added on the morning of
-      // the exercise would have grown a clock overnight. Only the moment of the add knows.
-      // A separate map from `backdated`: that one dates the TICK and is wiped when the tick
-      // is, and being put on a roster and being marked present on it are two different
-      // facts a row can carry one, both or neither of.
-      upd[`activities.${act.id}.addedLate.${accountId}`] = on && date < todayISO() ? true : deleteField()
-      // Taking the add back takes the tick with it. Leaving a tick behind would put a man
-      // in `entries` who is on nobody's roster — invisible today, and back on screen the
-      // moment anything else puts him there.
-      if (!on) {
-        upd[`activities.${act.id}.entries.${accountId}`] = deleteField()
-        upd[`activities.${act.id}.backdated.${accountId}`] = deleteField()
-      }
-      batch.update(doc(db, 'attendance', `${date}__${groupId}`), upd)
-      mirrorSelfActivities(batch, date, accountId, on ? { [act.id]: activityCardItem(date, act, false) } : { [act.id]: deleteField() })
-      await batch.commit()
-      patchLocalActivityLeaves(date, groupId, act.id, on
-        ? { added: { [accountId]: true }, addedLate: { [accountId]: date < todayISO() ? true : null } }
-        : { added: { [accountId]: null }, entries: { [accountId]: null }, backdated: { [accountId]: null }, addedLate: { [accountId]: null } })
-    } catch (e) { console.warn('addToActivity', e); return false }
-    return true
-  }
 
-  // Step 4: the morning record changed, so the sheets have to follow. Called as a sibling
-  // of syncMovementSeats from every daily writer, for the same reason — a status is set in
-  // nine places and each of them owes the same two follow-ups.
-  //
-  // Marking a man Present, Outfield or LATE seeds today's sheets onto his card; marking
-  // him MC or off takes them away. The one thing it must never do is erase attendance
-  // already recorded: a man ticked at the range whose morning entry is later corrected to
-  // MC moves onto `added` and KEEPS his tick, because the range sheet still says he was
-  // there. `added` does double duty — it is the answer to "who is on this roster despite
-  // the day", whether an admin put him there or a correction did.
-  //
-  // Runs for a day still to come as well as today, so that pre-marking a platoon reaches
-  // sheets that were created before it. The day's sheets come from `attendanceActivities`,
-  // which the Today tab's own date nav loads for whatever day is being marked — so the
-  // pair works without a read. Marking many days ahead at once still only reaches days
-  // that nav has visited; those are days sheets rarely exist for yet.
-  async function syncActivityCards(date, groupId, changes) {
-    if (date < todayISO() || !changes.length) return
-    const key = `${date}__${groupId}`
-    const acts = attendanceActivities[key] || {}
-    const ids = Object.keys(acts)
-    if (!ids.length) return
-    const here = onParadeIds(statuses)
-    const dayUpd = {}
-    try {
-      const batch = chunkedBatch()
-      changes.forEach(({ accountId, statusId }) => {
-        const onParade = here.has(statusId)
-        const items = {}
-        ids.forEach((id) => {
-          const act = acts[id]
-          const ticked = !!(act.entries || {})[accountId]
-          const added = !!(act.added || {})[accountId]
-          if (onParade || added) { items[id] = activityCardItem(date, act, ticked); return }
-          if (ticked) {
-            dayUpd[`activities.${id}.added.${accountId}`] = true
-            items[id] = activityCardItem(date, act, true)
-            return
-          }
-          items[id] = deleteField()
-        })
-        mirrorSelfActivities(batch, date, accountId, items)
-      })
-      if (Object.keys(dayUpd).length) batch.update(doc(db, 'attendance', key), dayUpd)
-      await batch.commit()
-    } catch (e) { console.warn('syncActivityCards', e); return false }
-    return true
-  }
 
   // ---- Supporting documents ------------------------------------------------
   // A flagged status (MC) carries a file and a date range. The file lives in
@@ -3889,255 +3055,15 @@ export default function App() {
   // day's attendance doc, so the board, the Count tab and history all keep working
   // without knowing ranges exist. Only the metadata rides on the attendance doc.
 
-  function statusDocId(from, groupId, accountId) {
-    return `${from}__${groupId}__${accountId}`
-  }
 
-  // ---- The day record stands on its own -------------------------------------
-  // A past day has to read back exactly as it was recorded. Everything the board needs is
-  // stamped onto the day document, so nothing about a finished day is re-derived from
-  // today's accounts or today's platoon config.
-  //
-  // Without this, moving one man between platoons quietly rewrites history in both
-  // directions: his record stays in the old platoon's document where no row draws it any
-  // more, and he appears as an unmarked row in the new platoon on days he was never in it.
-  // Both the company count and the report to higher read the same way, so a back-dated
-  // report would name him unmarked when he was marked Present. Editing a Section's
-  // reporting location does the same to every past day it used to cover.
-  //
-  // Stamped for TODAY AND FUTURE ONLY. A past day's stamp IS the record: a super admin
-  // correcting last Tuesday changes a STATUS, never who was there or where they reported.
-  // That is also what makes a transfer cheap — every past document already holds its own
-  // answer, so nothing has to be rewritten but the day the move happens on.
-  // `moved` = { id, groupId } applies a platoon move that has been written but has not yet
-  // come back through the accounts listener. Without it a transfer stamps both days from
-  // the pre-move roster and undoes itself — the listener is async, and this runs straight
-  // after the account write.
-  // Is this platoon-day frozen, and is this one man exempt? Read off `attendanceStamp`,
-  // which every attendance reader already fills — no extra read, and it is the same map
-  // the board draws from, so the two can never disagree.
-  function dayFreeze(date, groupId) {
-    return attendanceStamp[`${date}__${groupId}`] || null
-  }
-  function isFrozen(date, groupId) {
-    const f = dayFreeze(date, groupId)
-    return !!(f && f.frozen)
-  }
-  // A frozen day still moves for the men a super admin has reopened — and for a super
-  // admin, who the rules let through unconditionally.
-  function canEditFrozen(date, groupId, accountId) {
-    const f = dayFreeze(date, groupId)
-    if (!f || !f.frozen) return true
-    if (account?.isSuperAdmin) return true
-    return (f.unfrozen || []).includes(accountId)
-  }
 
-  function dayStamp(date, groupId, moved) {
-    if (!groupId || date < todayISO()) return null
-    // A frozen day keeps the roster it was reported with. Guarding HERE and not at the
-    // dozen call sites is the whole point of the function: every writer that spreads a
-    // stamp into its payload goes through it, so one `return null` takes the roster,
-    // both venue maps and the section map out of every one of them at once. It also
-    // makes the transfer rule fall out for free — see restampSectionDay, which already
-    // early-returns on a falsy stamp.
-    if (isFrozen(date, groupId)) return null
-    // ADMINS ONLY, and this is load-bearing rather than a permission check. A regular
-    // member's accounts listener is a __name__ query on his own document — he holds exactly
-    // one account — while the attendance rules let him write his own platoon's day (that is
-    // how self check-in works). Stamp from what HE can see and the roster becomes a list of
-    // one, erasing the platoon for that day the moment anybody checks in. The board would
-    // then read that day back as a single man.
-    // A day nobody with the full picture ever touched simply keeps no stamp and falls back
-    // to the live roster, which is the same as any record written before stamping existed.
-    if (!(account?.isAdmin || account?.isSuperAdmin)) return null
-    const g = groups.find((x) => x.id === groupId) || null
-    const groupOf = (a) => (moved && moved.id === a.id && moved.groupId !== undefined ? moved.groupId : (a.groupId || ''))
-    // `moved` is the change that has NOT reached `accounts` yet, applied by hand. A platoon
-    // move clears the Section too, so the man arrives ungrouped in his new platoon; a Section
-    // move carries the new Section instead and leaves the platoon alone.
-    const sectionOf = (a) => {
-      if (!moved || moved.id !== a.id) return a.miniGroupId || ''
-      if (moved.groupId !== undefined) return ''
-      return moved.miniGroupId || ''
-    }
-    // activeOn, so a man deferred from a later date is still on the days before it.
-    const roster = accounts.filter((a) => groupOf(a) === groupId && activeOn(a, date))
-    // A basic admin only holds his own platoon's accounts, so an empty roster means "I
-    // cannot see this platoon", not "it is empty" — stamping [] there would erase the real
-    // one. The rules stop him writing another platoon's day anyway; this is belt. During a
-    // move it IS legitimately empty: he may have been the last man in the platoon he left.
-    if (!roster.length && !moved) return null
-    const members = []
-    const sections = {}
-    const venuePersons = {}
-    roster.forEach((a) => {
-      members.push(a.id)
-      sections[a.id] = sectionOf(a)
-      // Through the SAME Section the stamp just recorded — a man's reporting location resolves
-      // section-first, so reading it off his stale account would file him under where the
-      // Section he is leaving reports.
 
-    })
-    // Resolved per Section — section entry, else platoon-wide, else the standing
-    // location. The board reads its Section lines straight off this.
-    //
-    // Keyed through SECTION_KEY because the ungrouped Section's id is the empty string,
-    // and Firestore refuses a document whose field name is empty — the whole write comes
-    // back 400 INVALID_ARGUMENT, taking the status with it. Every read of this map has to
-    // go back through the same function.
-    const venueSections = {}
-    Array.from(new Set(roster.map(sectionOf))).forEach((sid) => {
 
-    })
-    return { members, sections, venueSections, venuePersons }
-  }
 
-  // Dotted paths ("docs.abc") only work in update(), and update() throws on a doc
-  // that doesn't exist yet — which future days of a range do. set+merge with a
-  // nested map does both jobs, and carries groupId/date so the rules accept a create.
-  function dropDayEntry(batch, date, groupId, accountId) {
-    batch.set(doc(db, 'attendance', `${date}__${groupId}`), {
-      groupId, date, year: parseInt(date.slice(0, 4), 10),
-      ...(dayStamp(date, groupId) || {}),
-      entries: { [accountId]: deleteField() },
-      docs: { [accountId]: deleteField() },
-    }, { merge: true })
-  }
 
-  // `recorded` is what separates a status that counts from one that is only pending.
-  // A document-backed status reaches `entries` — the attendance record proper, which
-  // the board tallies and history keeps — only when it is vouched for: an admin's own
-  // certificate on upload, anyone else's when an admin confirms the dates. Until then
-  // the day carries just the marker in `docs`, which is enough for the board to show a
-  // tinted pill and for the person's phone to raise the upload prompt, and the entry
-  // is actively deleted so a status they were previously on can't linger.
-  function writeDayEntry(batch, date, groupId, accountId, statusId, meta, recorded = true) {
-    batch.set(doc(db, 'attendance', `${date}__${groupId}`), {
-      groupId, date, year: parseInt(date.slice(0, 4), 10),
-      ...(dayStamp(date, groupId) || {}),
-      entries: { [accountId]: recorded ? statusId : deleteField() },
-      docs: { [accountId]: meta },
-    }, { merge: true })
-  }
 
-  // Whose certificate stands on its own. An admin's is taken at face value — there is
-  // nobody above them to check it — so their status is recorded the moment they
-  // upload. Everyone else's waits for an admin to confirm the dates against the
-  // certificate. Note a regular user's `accounts` holds only their own row, which is
-  // all this needs: they only ever ask about themselves.
-  function docSelfRecording(accountId) {
-    const a = accountId === account.id ? account : accounts.find((x) => x.id === accountId)
-    return !!(a && (a.isAdmin || a.isSuperAdmin))
-  }
 
-  function deleteDocParts(batch, docId, chunks) {
-    for (let i = 0; i < (chunks || 0); i++) batch.delete(doc(db, 'mcDocs', docId, 'parts', String(i)))
-    batch.delete(doc(db, 'mcDocs', docId))
-  }
 
-  // Moving someone off a flagged status has to reach the rest of the range, or
-  // tomorrow still shows MC. Doing it on the FIRST day removes the whole thing;
-  // doing it partway through ends the range the day before and leaves the days
-  // already recorded alone — someone coming back early is history, not a mistake.
-  function retireStatusDoc(batch, meta, date, groupId, accountId) {
-    if (!meta || !meta.docId) return
-    const from = meta.docId.split('__')[0]
-    const lastKept = addDays(date, -1)
-    datesBetween(date > from ? date : from, meta.to).forEach((d) => {
-      if (d !== date) dropDayEntry(batch, d, groupId, accountId) // the caller owns `date`
-    })
-    if (date <= from) { deleteDocParts(batch, meta.docId, meta.chunks); return }
-    batch.update(doc(db, 'mcDocs', meta.docId), { to: lastKept })
-    const shortened = { ...meta, to: lastKept }
-    datesBetween(from, lastKept).forEach((d) => {
-      batch.set(doc(db, 'attendance', `${d}__${groupId}`), { docs: { [accountId]: shortened } }, { merge: true })
-    })
-  }
-
-  // The whole upload in ONE batch: the record, every part, every day of the range,
-  // and the member's own card. That atomicity is what makes "the status can't be set
-  // without the document" true rather than merely enforced in the UI.
-  async function saveStatusDoc({ from, to, groupId, accountId, statusId, blob, fileName, mimeType, prevMeta }) {
-    const docId = statusDocId(from, groupId, accountId)
-    const bytes = new Uint8Array(await blob.arrayBuffer())
-    const parts = chunkBytes(bytes)
-    const at = Date.now()
-    // Uploads are always for the logged-in user, so this is their own certificate.
-    const recorded = docSelfRecording(accountId)
-    // An admin's own certificate arrives verified, by the same reasoning that records
-    // their status straight away: they entered the last day off the certificate in
-    // their hand, and the second pair of eyes the verify step exists for is a person
-    // who doesn't outrank them. Everyone else's stays unverified until an admin reads
-    // the dates off it in the viewer.
-    // statusId rides on the metadata because, while the status is still pending, it is
-    // the ONLY place it exists — `entries` is empty until someone vouches for it, so
-    // the board and the owner's own card read the pill from here.
-    const meta = { docId, name: fileName, type: mimeType, bytes: bytes.length, chunks: parts.length, at, to, verified: recorded, statusId }
-    if (recorded) {
-      meta.verifiedByName = memberLabel(account)
-      meta.verifiedAt = at
-    }
-    const days = datesBetween(from, to)
-
-    const batch = writeBatch(db)
-    batch.set(doc(db, 'mcDocs', docId), {
-      accountId, groupId, statusId, from, to,
-      fileName, mimeType, bytes: bytes.length, chunks: parts.length,
-      uploadedAt: at, uploadedBy: account.id,
-      ...(recorded ? { verifiedBy: account.id, verifiedByName: memberLabel(account), verifiedAt: at } : {}),
-    })
-    // Bytes.fromUint8Array, not the raw array: the browser build of the Firestore SDK
-    // rejects a plain Uint8Array outright ("Unsupported field value: a custom
-    // Uint8Array object"). Only the Node SDK accepts one.
-    // `data` holds the slice's contents; the parent's `bytes` holds the file SIZE.
-    // Renaming this field strands every certificate already uploaded, and the
-    // Console index exemption names it too — change all three or none.
-    parts.forEach((p, i) => batch.set(doc(db, 'mcDocs', docId, 'parts', String(i)), { data: Bytes.fromUint8Array(p) }))
-    // Replacing a longer file leaves parts past the new end; they'd never be read
-    // again but would sit against the 1 GiB free allowance forever.
-    for (let i = parts.length; i < ((prevMeta && prevMeta.chunks) || 0); i++) {
-      batch.delete(doc(db, 'mcDocs', docId, 'parts', String(i)))
-    }
-    const keep = new Set(days)
-    if (prevMeta) datesBetween(from, prevMeta.to).forEach((d) => { if (!keep.has(d)) dropDayEntry(batch, d, groupId, accountId) })
-    days.forEach((d) => writeDayEntry(batch, d, groupId, accountId, statusId, meta, recorded))
-    batch.set(doc(db, 'attendanceSelf', accountId), {
-      date: from, groupId, statusId: recorded ? statusId : null, until: to, docMeta: meta,
-    }, { merge: true })
-    await batch.commit()
-    applyRangeLocally(days, groupId, accountId, recorded ? statusId : null, meta, prevMeta, from)
-    // A certificate is a status like any other, and it is the commonest reason a man misses
-    // a move-out — but it is written HERE rather than through setStatusFor, so the seat drop
-    // has to be triggered here too. Every day in the range: syncMovementSeats returns at once
-    // for any day no manifest starts on, so a two-week MC costs nothing extra.
-    //
-    // An unverified certificate records no status at all, which is not the expected one
-    // either — the same rule that takes a cleared man off his truck.
-    for (const d of days) await syncMovementSeats(d, [{ accountId, statusId: recorded ? statusId : null }])
-    // The sheets follow the same correction the truck does. Only today's can be
-    // affected — syncActivityCards returns at once for any other day — so a two-week
-    // certificate costs one no-op per day and one real write on the one that matters.
-    for (const d of days) await syncActivityCards(d, groupId, [{ accountId, statusId: recorded ? statusId : null }])
-    return meta
-  }
-
-  // Admin confirming or correcting the last day, or the member fixing their own typo
-  // before it's been confirmed. Only the delta is written: extending adds the new
-  // days, shortening drops the ones that fell off the end.
-  // Which platoon a man's record for a given day belongs to. Everything before his transfer
-  // belongs to the platoon he left; everything on or after it to the one he joined.
-  function groupForDay(accountId, day, fallbackGroupId) {
-    const a = accounts.find((x) => x.id === accountId)
-    if (!a) return fallbackGroupId
-    if (a.prevGroupId && a.groupChangedOn && day < a.groupChangedOn) return a.prevGroupId
-    // Otherwise the board the caller is on, NOT the man's current platoon. With no recorded
-    // transfer this is byte-for-byte the old behaviour, so a certificate for a man who never
-    // moved cannot be routed anywhere new. Reading `a.groupId` here would also redirect the
-    // writes for anyone who transferred BEFORE these fields existed — his account says the
-    // new platoon while the day being verified belongs to the old one, and there is nothing
-    // recorded to tell them apart. Only a transfer we actually witnessed splits a range.
-    return fallbackGroupId
-  }
   // ...and whether this admin may write it. A basic admin holds one platoon: the rules reject
   // a write naming any other, and a rejected write fails the WHOLE batch — so a range
   // straddling a transfer would take the entire verification down with it. Days outside his
@@ -4145,597 +3071,20 @@ export default function App() {
   // before the transfer are not his platoon's to record.
   const canWriteGroup = (gid) => !!account && (account.isSuperAdmin || gid === (account.groupId || ''))
 
-  async function setStatusDocRange({ meta, groupId, accountId, statusId, newTo, verify }) {
-    const from = meta.docId.split('__')[0]
-    const next = { ...meta, to: newTo, verified: verify ? true : meta.verified }
-    const batch = writeBatch(db)
-    const patch = { to: newTo }
-    if (verify) {
-      patch.verifiedBy = account.id
-      patch.verifiedByName = memberLabel(account)
-      patch.verifiedAt = Date.now()
-      // Carried on the metadata too, so the viewer can name who confirmed it without
-      // reading the record back — the map is already in hand from the board.
-      next.verifiedByName = patch.verifiedByName
-      next.verifiedAt = patch.verifiedAt
-    }
-    batch.update(doc(db, 'mcDocs', meta.docId), patch)
-    if (newTo < meta.to) datesBetween(addDays(newTo, 1), meta.to).forEach((d) => {
-      const g = groupForDay(accountId, d, groupId)
-      if (canWriteGroup(g)) dropDayEntry(batch, d, g, accountId)
-    })
-    const days = datesBetween(from, newTo)
-    // Confirming is the moment a member's MC becomes a recorded status. An owner who
-    // records on their own certificate stays recorded when they only edit the dates.
-    const recorded = !!next.verified || docSelfRecording(accountId)
-    days.forEach((d) => {
-      const g = groupForDay(accountId, d, groupId)
-      if (!canWriteGroup(g)) return
-      writeDayEntry(batch, d, g, accountId, statusId, next, recorded)
-    })
-    batch.set(doc(db, 'attendanceSelf', accountId), { date: from, groupId, statusId: recorded ? statusId : null, until: newTo, docMeta: next }, { merge: true })
-    await batch.commit()
-    // Local state only has to cover the board that is open; days belonging to the OTHER
-    // platoon are read from Firestore when that board is next looked at.
-    applyRangeLocally(days.filter((d) => groupForDay(accountId, d, groupId) === groupId), groupId, accountId, recorded ? statusId : null, next, meta, from)
-    // Both directions. Extending a certificate over a manifest's day takes the man off it;
-    // shortening it back off that day leaves him with no status there, which is not the
-    // expected one either, so he does not get the seat back — a seat is given by an admin,
-    // never returned by a date change. Every day either range covered, so nothing is missed
-    // whichever way the end moved.
-    const touched = [...new Set([...days, ...datesBetween(from, meta.to)])]
-    for (const d of touched) {
-      await syncMovementSeats(d, [{ accountId, statusId: d <= newTo && recorded ? statusId : null }])
-      await syncActivityCards(d, groupForDay(accountId, d, groupId), [{ accountId, statusId: d <= newTo && recorded ? statusId : null }])
-    }
-    return next
-  }
 
-  async function removeStatusDoc({ meta, groupId, accountId }) {
-    const from = meta.docId.split('__')[0]
-    const days = datesBetween(from, meta.to)
-    const batch = writeBatch(db)
-    deleteDocParts(batch, meta.docId, meta.chunks)
-    days.forEach((d) => dropDayEntry(batch, d, groupId, accountId))
-    // The status goes with it: a flagged status always has a document behind it, so
-    // leaving MC set with nothing attached would just re-raise the "attach yours" card.
-    batch.set(doc(db, 'attendanceSelf', accountId), { date: todayISO(), groupId, statusId: null, until: null, docMeta: null }, { merge: true })
-    await batch.commit()
-    applyRangeLocally(days, groupId, accountId, null, null, meta, from)
-    // Removing the certificate clears the status with it, so every day it covered goes back
-    // to having no status at all — which is not the expected one, and takes the man off any
-    // manifest starting on one of those days. Same rule as clearing a status by hand.
-    for (const d of days) await syncMovementSeats(d, [{ accountId, statusId: null }])
-    for (const d of days) await syncActivityCards(d, groupId, [{ accountId, statusId: null }])
-  }
 
-  // Parts are addressed by index and the count is on the metadata, so reading a file
-  // never needs a list. Only ever called when someone actually taps to view.
-  async function loadStatusDoc(meta) {
-    const parts = []
-    for (let i = 0; i < meta.chunks; i++) {
-      const snap = await getDoc(doc(db, 'mcDocs', meta.docId, 'parts', String(i)))
-      if (!snap.exists()) throw new Error('missing part')
-      const chunk = snap.data().data
-      parts.push(chunk && chunk.toUint8Array ? chunk.toUint8Array() : chunk)
-    }
-    return blobFrom(parts, meta.type)
-  }
 
-  // Optimistic local echo, same reasoning as setStatusFor: without it the pill and
-  // the marker keep showing stale state until the round-trip lands. `prev` is the
-  // range being replaced, so days that dropped off it clear too.
-  function applyRangeLocally(days, groupId, accountId, statusId, meta, prev, from) {
-    const stale = prev ? datesBetween(from, prev.to).filter((d) => !days.includes(d)) : []
-    const patch = (setter, value) => setter((prevState) => {
-      const next = { ...prevState }
-      days.forEach((d) => {
-        const key = `${d}__${groupId}`
-        const row = { ...(next[key] || {}) }
-        if (value === null || value === undefined) delete row[accountId]
-        else row[accountId] = value
-        next[key] = row
-      })
-      stale.forEach((d) => {
-        const key = `${d}__${groupId}`
-        const row = { ...(next[key] || {}) }
-        delete row[accountId]
-        next[key] = row
-      })
-      return next
-    })
-    patch(setAttendance, statusId)
-    patch(setAttendanceDocs, meta)
-  }
 
-  // Putting someone on a status that needs a certificate. Nothing is recorded: only
-  // they can produce the document, so the day carries an assignment marker until they
-  // upload it and — unless they are an admin — an admin confirms the dates. Their
-  // previous status is cleared, since they are no longer on it either.
-  async function assignDocStatus(date, groupId, accountId, statusId) {
-    const key = `${date}__${groupId}`
-    const meta = { statusId, at: Date.now(), assignedBy: account.id, verified: false }
-    setAttendance((prev) => {
-      const row = { ...(prev[key] || {}) }
-      delete row[accountId]
-      return { ...prev, [key]: row }
-    })
-    setAttendanceDocs((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), [accountId]: meta } }))
-    try {
-      const batch = writeBatch(db)
-      // Replacing whatever was there before, document and all — retire skips `date`
-      // because a batch can't write the same document twice, so this write owns it.
-      retireStatusDoc(batch, (attendanceDocs[key] || {})[accountId], date, groupId, accountId)
-      writeDayEntry(batch, date, groupId, accountId, statusId, meta, false)
-      mirrorSelfCard(batch, date, groupId, accountId, { statusId: null, docMeta: meta })
-      await batch.commit()
-    } catch (e) {}
-  }
 
-  // A status flagged "Removes from Attendance" (DEFER) does two things at once:
-  // it records why the person wasn't there today, and it takes them off the board
-  // from tomorrow. Both go in the batch that writes the day, so the standing state
-  // can never land without the record that explains it.
-  //
-  // TOMORROW, not today — today's roll call may already have gone to higher, and
-  // the day's record has to keep saying why they were absent.
-  //
-  // The same call also UNDOES it: moving someone off that status on the day they
-  // were deferred clears the flag again, so an admin who taps the wrong tile fixes
-  // it where they made the mistake. The date must match exactly, so editing some
-  // unrelated past day can never disturb a defer that's standing.
-  //
-  // `deferredPrev` rides alongside: the status DEFER displaced on that day, so
-  // Return to Platoon can put it back rather than leaving the day blank. Nothing
-  // else records a previous status — an entry is overwritten in place — so if it
-  // isn't captured here it cannot be recovered later.
-  function applyDeferral(batch, date, accountId, statusId, prevStatusId) {
-    const from = addDays(date, 1)
-    const s = statusId ? statuses.find((x) => x.id === statusId) : null
-    if (s && s.stopsAttending) {
-      batch.set(doc(db, 'accounts', accountId), { deferredFrom: from, deferredPrev: prevStatusId || deleteField() }, { merge: true })
-      return
-    }
-    const acc = accounts.find((a) => a.id === accountId)
-    if (acc && acc.deferredFrom === from) {
-      batch.set(doc(db, 'accounts', accountId), { deferredFrom: deleteField(), deferredPrev: deleteField() }, { merge: true })
-    }
-  }
 
-  // `restoring` is Return to Platoon putting back the status DEFER displaced. That
-  // is an undo, not a new record, so the day's backdated mark is left exactly as it
-  // was — otherwise a Present marked on the day itself would come back wearing a
-  // "recorded after the day" clock it never earned.
-  async function setStatusFor(date, groupId, accountId, statusId, restoring = false) {
-    const key = `${date}__${groupId}`
-    const current = attendance[key] || {}
-    const turningOff = current[accountId] === statusId
-    // A man a super admin reopened RE-LOCKS the moment his status is recorded.
-    // Unfreezing him is an exemption to fix one thing, and the fix is the end of it —
-    // without this there is no way back onto the record from the board at all, only an
-    // untick buried in the banner's list. Same batch as the status itself, so the board
-    // is never caught showing him open with the new status already set.
-    // Turning a status OFF deliberately does NOT re-lock: that leaves him unmarked, and
-    // a locked unmarked row is a dead end nobody can clear.
-    // ANY admin, not just the super admin who opened him: whoever fixes the status
-    // finishes the job in the same tap. Opening a man stays the super admin's alone —
-    // firestore.rules lets `unfrozen` shrink on a platoon admin's write and never grow
-    // (unfrozenOnlyShrinks), so the most he can do here is put men back under the
-    // freeze. That valve is what makes this safe to share, and it has to exist before
-    // this ships: the re-lock rides in the same batch as the status, so a denied
-    // re-lock would take his status change down with it.
-    const relock = !turningOff && isFrozen(date, groupId)
-      && ((dayFreeze(date, groupId) || {}).unfrozen || []).includes(accountId)
-    const nextEntries = { ...current }
-    if (turningOff) delete nextEntries[accountId]
-    else nextEntries[accountId] = statusId
-    // Optimistic, like clearStatusFor below — without this, the row pill and
-    // status picker keep showing stale local state until the Firestore
-    // round-trip echoes back.
-    setAttendance((prev) => ({ ...prev, [key]: nextEntries }))
-    if (!restoring) setAttendanceBackdated((prev) => {
-      const row = { ...(prev[key] || {}) }
-      if (turningOff || date >= todayISO()) delete row[accountId]
-      else row[accountId] = true
-      return { ...prev, [key]: row }
-    })
-    try {
-      const batch = writeBatch(db)
-      if (turningOff) {
-        // A merge write can only ADD or OVERWRITE map keys — never remove one.
-        // Dropping the key from the local object left the server copy untouched,
-        // so tapping the selected status looked like it cleared and then came
-        // back on the next refresh. Delete the field itself, as clearStatusFor does.
-        batch.update(doc(db, 'attendance', key), { [`entries.${accountId}`]: deleteField(), [`docs.${accountId}`]: deleteField(), [`backdated.${accountId}`]: deleteField() })
-      } else {
-        // The docs key has to go in THIS write, not in retireStatusDoc: a batch can't
-        // touch the same document twice, so retire skips today and the caller owns it.
-        // Nested, not dotted — dotted paths are an update()-only feature.
-        // Stamped here because it can't be recovered afterwards — see the state it
-        // feeds. Cleared, not left standing, when the same status is set on the day
-        // itself: a record put right on the day is not a backdated one.
-        // A restore leaves the mark alone by OMITTING the key. Not by passing an
-        // empty map: merge builds its field mask from leaf paths, and a map with
-        // no leaves masks the map itself — `backdated: {}` wipes the whole day's
-        // marks for everyone, which is exactly what it did before this comment.
-        const payload = { entries: nextEntries, docs: { [accountId]: deleteField() }, groupId, date, year: parseInt(date.slice(0, 4), 10), ...(dayStamp(date, groupId) || {}) }
-        if (!restoring) payload.backdated = { [accountId]: date < todayISO() ? true : deleteField() }
-        // Only ever shrinks, which is exactly what the rules allow here. Growing
-        // `unfrozen` — opening a man — is done by setPersonFrozen, off the banner,
-        // by a super admin, and never as a side effect of recording a status.
-        if (relock) payload.unfrozen = arrayRemove(accountId)
-        batch.set(doc(db, 'attendance', key), payload, { merge: true })
-      }
-      // Any document on this day belongs to the status being replaced (only a flagged
-      // status has one), so it retires either way — turning MC off, or swapping it for
-      // something else. Without this the rest of the range keeps showing MC.
-      retireStatusDoc(batch, (attendanceDocs[key] || {})[accountId], date, groupId, accountId)
-      mirrorSelfCard(batch, date, groupId, accountId, { statusId: turningOff ? null : statusId, ...(relock ? { openOn: deleteField() } : {}) })
-      applyDeferral(batch, date, accountId, turningOff ? null : statusId, current[accountId] || null)
-      await batch.commit()
-      await syncMovementSeats(date, [{ accountId, statusId: turningOff ? null : statusId }])
-      await syncActivityCards(date, groupId, [{ accountId, statusId: turningOff ? null : statusId }])
-    } catch (e) {}
-  }
 
-  // The days AFTER the first, when the Today board marks someone across a range. An
-  // outfield that runs into tomorrow means everyone on it is already accounted for
-  // tomorrow, and waiting until the morning to say so only means saying it twice.
-  //
-  // Day one is not touched here — setStatusFor or clearStatusFor owns it, keeping the
-  // toggle-off, the certificate retire, the deferral and the member's own card exactly
-  // as they are. What's left is plain entries: these days are in the FUTURE, so nothing
-  // is backdated, mirrorSelfCard writes today only so no card is touched, and a
-  // document-backed status carries its own dates and never reaches here.
-  //
-  // A separate commit from day one's, because a batch cannot write the same document
-  // twice. So a failure here leaves today marked and tomorrow not — the harmless half
-  // to lose, since tomorrow is the one that can still be fixed in the morning.
-  // Rules already allow it: attendance writes are gated on `attDate() >= sgToday()`.
-  //
-  // `statusId` null is the Clear path — the same days, emptied.
-  async function setDaysAhead(from, to, groupId, accountId, statusId) {
-    const days = datesBetween(addDays(from, 1), to)
-    if (!days.length) return
-    applyRangeLocally(days, groupId, accountId, statusId, null, null, from)
-    try {
-      const batch = writeBatch(db)
-      days.forEach((d) => batch.set(doc(db, 'attendance', `${d}__${groupId}`), {
-        groupId, date: d, year: parseInt(d.slice(0, 4), 10),
-        ...(dayStamp(d, groupId) || {}),
-        entries: { [accountId]: statusId || deleteField() },
-      }, { merge: true }))
-      // Every one of these days is in the future, so each lands in `nextDays` on the one
-      // card — one write for the whole range, not one per day, since a merge into a map
-      // is a single field write.
-      days.forEach((d) => mirrorSelfCard(batch, d, groupId, accountId, { statusId }))
-      await batch.commit()
-    } catch (e) {}
-  }
 
-  async function clearStatusFor(date, groupId, accountId) {
-    const key = `${date}__${groupId}`
-    setAttendance(prev => {
-      const entries = { ...(prev[key] || {}) }
-      delete entries[accountId]
-      return { ...prev, [key]: entries }
-    })
-    setAttendanceVerifiers(prev => {
-      const verifiers = { ...(prev[key] || {}) }
-      delete verifiers[accountId]
-      return { ...prev, [key]: verifiers }
-    })
-    setAttendanceVenues(prev => {
-      const venues = { ...(prev[key] || {}) }
-      delete venues[accountId]
-      return { ...prev, [key]: venues }
-    })
-    setAttendanceDocs(prev => {
-      const docsMap = { ...(prev[key] || {}) }
-      delete docsMap[accountId]
-      return { ...prev, [key]: docsMap }
-    })
-    setAttendanceBackdated(prev => {
-      const row = { ...(prev[key] || {}) }
-      delete row[accountId]
-      return { ...prev, [key]: row }
-    })
-    try {
-      const batch = writeBatch(db)
-      batch.update(doc(db, 'attendance', key), {
-        [`entries.${accountId}`]: deleteField(),
-        [`verifiers.${accountId}`]: deleteField(),
-        [`venues.${accountId}`]: deleteField(),
-        [`docs.${accountId}`]: deleteField(),
-        [`backdated.${accountId}`]: deleteField(),
-      })
-      retireStatusDoc(batch, (attendanceDocs[key] || {})[accountId], date, groupId, accountId)
-      mirrorSelfCard(batch, date, groupId, accountId, { statusId: null, verifier: null, venueId: null })
-      applyDeferral(batch, date, accountId, null)
-      await batch.commit()
-      // Cleared is not Outfield either — an unmarked man has no more claim to a seat than
-      // one marked MC, and leaving him on the truck is the same lie about the strength.
-      // (On an activity it IS Present, and syncMovementSeats knows that, so he keeps it.)
-      await syncMovementSeats(date, [{ accountId, statusId: null }])
-      await syncActivityCards(date, groupId, [{ accountId, statusId: null }])
-    } catch (e) {}
-  }
 
-  async function markAllAs(date, groupId, statusId, accountIds) {
-    const key = `${date}__${groupId}`
-    const entries = {}
-    accountIds.forEach((id) => { entries[id] = statusId })
-    // Optimistic, the same as setStatusFor. Today gets away without it because a
-    // live listener echoes the write straight back; a past day is read once with
-    // getDoc when the date changes, so nothing came back and Mark All looked like
-    // it had done nothing at all.
-    setAttendance((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), ...entries } }))
-    if (date < todayISO()) {
-      setAttendanceBackdated((prev) => {
-        const row = { ...(prev[key] || {}) }
-        accountIds.forEach((id) => { row[id] = true })
-        return { ...prev, [key]: row }
-      })
-    }
-    try {
-      // One board write plus one small card per person. The cards are the extra
-      // cost of this design — but they're writes, and they buy back far more in
-      // reads than they spend (see mirrorSelfCard). A batch caps at 500 writes,
-      // which bounds a single Mark All to 499 people; larger platoons would need
-      // chunking, and nothing here is close to that.
-      const batch = writeBatch(db)
-      const docsGone = {}
-      accountIds.forEach((id) => { if ((attendanceDocs[key] || {})[id]) docsGone[id] = deleteField() })
-      const payload = { entries, groupId, date, year: parseInt(date.slice(0, 4), 10), ...(dayStamp(date, groupId) || {}) }
-      // Mark All on a past day is a backdated record for every person it touches.
-      // On today it writes nothing here: a doc for today was created today, so
-      // there is no stale flag to clear.
-      if (date < todayISO()) {
-        const marks = {}
-        accountIds.forEach((id) => { marks[id] = true })
-        if (Object.keys(marks).length) payload.backdated = marks
-      }
-      // Only when there IS something to delete. An empty map is not a no-op under
-      // merge — `docs: {}` sets the whole field to empty, which wiped the markers of
-      // everyone Mark All had deliberately skipped.
-      if (Object.keys(docsGone).length) payload.docs = docsGone
-      batch.set(doc(db, 'attendance', key), payload, { merge: true })
-      // Anyone swept up by Mark All who was on a flagged status loses it, so their
-      // document retires with it — same rule as setStatusFor. This day's marker is
-      // cleared just above; retireStatusDoc handles the rest of each range.
-      accountIds.forEach((id) => retireStatusDoc(batch, (attendanceDocs[key] || {})[id], date, groupId, id))
-      accountIds.forEach((id) => mirrorSelfCard(batch, date, groupId, id, { statusId }))
-      await batch.commit()
-      await syncMovementSeats(date, accountIds.map((id) => ({ accountId: id, statusId })))
-      await syncActivityCards(date, groupId, accountIds.map((id) => ({ accountId: id, statusId })))
-    } catch (e) {}
-  }
 
-  // `venueId` is set only by proximity check-in — the one path that actually
-  // validates against a venue — so the day keeps a record of where the person
-  // was, independent of the schedule that produced it.
-  async function confirmStatus(date, groupId, accountId, statusId, venueId) {
-    const key = `${date}__${groupId}`
-    const current = attendance[key] || {}
-    const nextEntries = { ...current, [accountId]: statusId }
-    // Optimistic — same reasoning as setStatusFor. handleClearStatus reads
-    // myDayRecord[account.id] right after this to decide what a follow-up tap
-    // on the status banner should do next; without this it can act on a
-    // stale (not-yet-set) value if tapped again before the round-trip lands.
-    setAttendance((prev) => ({ ...prev, [key]: nextEntries }))
-    const payload = { entries: nextEntries, docs: { [accountId]: deleteField() }, groupId, date, year: parseInt(date.slice(0, 4), 10), ...(dayStamp(date, groupId) || {}) }
-    if (venueId) {
-      payload.venues = { ...(attendanceVenues[key] || {}), [accountId]: venueId }
-      setAttendanceVenues((prev) => ({ ...prev, [key]: payload.venues }))
-    }
-    try {
-      const batch = writeBatch(db)
-      batch.set(doc(db, 'attendance', key), payload, { merge: true })
-      // Checking in ends a flagged status the same way marking does — someone on MC
-      // who turns up and scans is back, so the rest of the range shouldn't stand.
-      retireStatusDoc(batch, (attendanceDocs[key] || {})[accountId], date, groupId, accountId)
-      mirrorSelfCard(batch, date, groupId, accountId, venueId ? { statusId, venueId } : { statusId })
-      await batch.commit()
-      await syncMovementSeats(date, [{ accountId, statusId }])
-      await syncActivityCards(date, groupId, [{ accountId, statusId }])
-    } catch (e) {}
-  }
 
-  async function createCheckinToken() {
-    const ref = await addDoc(collection(db, 'checkinTokens'), {
-      issuerId: account.id,
-      issuerName: account.displayName || account.username,
-      // The nickname rides along so the scanner's confirmation can call this person
-      // what every other list in the app calls them. It has to be written here rather
-      // than looked up on the scanning side: accounts reads are locked to the admin's
-      // own platoon, and a QR is often presented by someone from another one, whose
-      // account the scanning admin cannot read.
-      issuerNickname: memberLabel(account),
-      issuerGroupId: account.groupId || '',
-      createdAt: Date.now(),
-    })
-    return ref.id
-  }
 
-  // `activityId` is set when the admin scans with an activity roster open, and it changes
-  // WHICH SHEET the scan marks. The token itself is unchanged either way — it identifies
-  // the man, never the sheet — so the scanner's screen is what decides, which is also why
-  // createCheckinToken needs no change and the member's QR is the same code on every card.
-  async function useCheckinToken(tokenId, activityId) {
-    try {
-      const tokenRef = doc(db, 'checkinTokens', tokenId)
-      const tokenSnap = await getDoc(tokenRef)
-      if (!tokenSnap.exists()) return { ok: false, message: 'QR expired. Ask for a fresh QR.' }
-      const token = tokenSnap.data()
-      // Freshness is enforced by the shower, not here: it rotates the token every
-      // 25s (deleting the old one) and deletes it on close, so a token that still
-      // exists is current. We deliberately don't compare token.createdAt against
-      // our own clock — the two phones' clocks drift, and a scanner running ahead
-      // would read every fresh QR as "expired".
-      if (!account.isAdmin) {
-        return { ok: false, message: 'Only an admin can scan a QR code.' }
-      }
-      if (!statuses.length) return { ok: false, message: 'No statuses configured.' }
-      const checkInAccountId = token.issuerId
-      const checkInGroupId = token.issuerGroupId
-      // Nickname for the confirmation message; the full name stays on the token and is
-      // what a token written by an older client still carries.
-      const checkInName = token.issuerNickname || token.issuerName
-      const verifierId = account.id
-      const verifierName = account.displayName || account.username
-      const verifierGroupId = account.groupId || ''
-      const primaryStatusId = statuses[0].id
-      const date = todayISO()
-      const key = `${date}__${checkInGroupId}`
-      const current = attendance[key] || {}
-      const verifier0 = { adminId: verifierId, adminName: verifierName, adminGroupId: verifierGroupId }
-      if (activityId) {
-        // Scanning into a sheet writes the sheet and NOTHING ELSE. This branch returns
-        // before the daily write below, and that is the whole point: promoting a man to
-        // Present for the day would silently end a five-day MC and retire its certificate
-        // (confirmStatus / retireStatusDoc do exactly that). A man on MC who turns up at
-        // the night roll call is on MC in the morning record, certificate intact, AND
-        // present at the night roll call. Both are true; neither overwrites the other.
-        const act = (attendanceActivities[key] || {})[activityId]
-        if (!act) return { ok: false, message: 'That activity is not on this platoon’s sheet.' }
-        const here = onParadeIds(statuses)
-        const onRoster = here.has(current[checkInAccountId]) || !!(act.added || {})[checkInAccountId]
-        const upd = {
-          [`activities.${activityId}.entries.${checkInAccountId}`]: true,
-          [`activities.${activityId}.verifiers.${checkInAccountId}`]: verifier0,
-        }
-        // A scan of somebody not on the roster ADDS him and marks him, in one action.
-        // The admin at the door has already made the judgement rule 2 asks for; making him
-        // cancel, open the picker, find the name and scan again is ceremony in a queue.
-        if (!onRoster) upd[`activities.${activityId}.added.${checkInAccountId}`] = true
-        const b = writeBatch(db)
-        b.update(doc(db, 'attendance', key), upd)
-        mirrorSelfActivities(b, date, checkInAccountId, { [activityId]: activityCardItem(date, act, true) })
-        await b.commit()
-        await deleteDoc(tokenRef)
-        // The confirmation names his DAILY status when he had to be added, so an admin who
-        // scanned the wrong man sees it immediately. A notification, not a confirm step.
-        // His status is read from `entries` OR from the day's `docs` map. A man on an
-        // unverified certificate has no entry at all — MC lives in `docs` until an admin
-        // verifies the dates — and he is exactly the man this confirmation is for, so
-        // reading only `entries` left the one case that matters unnamed.
-        const s0 = statuses.find((x) => x.id === (current[checkInAccountId]
-          || ((attendanceDocs[key] || {})[checkInAccountId] || {}).statusId))
-        return { ok: true, message: onRoster ? `Marked ${checkInName} present.` : `Added ${checkInName}${s0 ? ` · ${s0.label}` : ''} — marked present.` }
-      }
-      const nextEntries = { ...current, [checkInAccountId]: primaryStatusId }
-      const currentVerifiers = attendanceVerifiers[key] || {}
-      const verifier = { adminId: verifierId, adminName: verifierName, adminGroupId: verifierGroupId }
-      const qrBatch = writeBatch(db)
-      qrBatch.set(doc(db, 'attendance', key), {
-        entries: nextEntries,
-        verifiers: { ...currentVerifiers, [checkInAccountId]: verifier },
-        groupId: checkInGroupId,
-        date,
-        year: parseInt(date.slice(0, 4), 10),
-      }, { merge: true })
-      mirrorSelfCard(qrBatch, date, checkInGroupId, checkInAccountId, { statusId: primaryStatusId, verifier })
-      await qrBatch.commit()
-      // Delete only after attendance is recorded. The shower watches this doc and
-      // shows "Checked In!" the moment it disappears, so deleting on any earlier
-      // failure path (or before the write) would flash a false success on their side.
-      await deleteDoc(tokenRef)
-      return { ok: true, message: `Checked-In ${checkInName}!` }
-    } catch (e) {
-      return { ok: false, message: 'Error processing QR code.' }
-    }
-  }
 
-  // Move one year's day documents into `attendanceArchive`, then clear what they left
-  // behind on the members' own cards.
-  //
-  // Activity attendance is NOT a separate collection — a sheet is an `activities` map on
-  // the very same `attendance/{date}__{group}` document as that morning's roll call — so
-  // the archive copy has always carried it, for free, in `...d.data()`. Nothing here
-  // changes that and nothing needs to: records and sheets cannot be archived apart.
-  //
-  // What DOES need doing is the mirror. Every sheet writes a small item onto each rostered
-  // member's `attendanceSelf` card, because a member cannot read `attendance/` at all
-  // (attendance-self-card-model). Deleting a sheet clears its item; a sheet that simply
-  // happened leaves it for good. The reader only ever shows items dated today and ignores
-  // the rest, so they are invisible — and they never stop accumulating on the one document
-  // that member's phone downloads on every single login. Exactly the leak the finished-
-  // manifest sweep already fixes for `mvSeats`, and fixed the same way.
-  //
-  // Shared by both callers deliberately. The automatic sweep is what actually runs on
-  // almost every real year-end; if only the manual card swept the cards, the cards would
-  // never be swept.
-  async function archiveYearDocs(yearDocs, year) {
-    // Who is holding an item for each of this year's sheets. Derived from the documents
-    // already in hand, so the sweep costs no extra reads: rosterFrom() is "on parade that
-    // morning" ∪ "added by hand", and both of those are keys in this very document. A
-    // superset is fine and cheaper than being exact — deleting a field that was never
-    // written is a no-op, and a member the roster has since lost still holds his item.
-    const cards = new Map()
-    yearDocs.forEach((d) => {
-      const v = d.data()
-      const acts = v.activities || {}
-      const ids = Object.keys(acts)
-      if (!ids.length) return
-      const who = new Set(Object.keys(v.entries || {}))
-      ids.forEach((id) => {
-        Object.keys((acts[id] || {}).added || {}).forEach((a) => who.add(a))
-        Object.keys((acts[id] || {}).entries || {}).forEach((a) => who.add(a))
-      })
-      who.forEach((a) => {
-        const cur = cards.get(a) || new Set()
-        ids.forEach((id) => cur.add(id))
-        cards.set(a, cur)
-      })
-    })
-    await Promise.all(yearDocs.map(async (d) => {
-      await setDoc(doc(db, 'attendanceArchive', `${year}__${d.id}`), {
-        ...d.data(), originalKey: d.id, archivedAt: Date.now(), year: Number(year),
-      })
-      await deleteDoc(d.ref)
-    }))
-    // The overrides that explain those days go with them.
-    await archiveOverrides(year)
-    if (cards.size) {
-      // Keyed by ACTIVITY ID, not by date. The card's items are a merged map and this is
-      // one card shared with the live year — a member archiving 2025 in 2026 is holding
-      // this year's sheets in the same map, and only the ids listed above are last year's.
-      const batch = chunkedBatch()
-      cards.forEach((ids, accountId) => {
-        const items = {}
-        ids.forEach((id) => { items[id] = deleteField() })
-        batch.set(doc(db, 'attendanceSelf', accountId), { activities: { items } }, { merge: true })
-      })
-      await batch.commit()
-    }
-  }
 
-  async function archiveAttendance(year) {
-    try {
-      const snap = await getDocs(collection(db, 'attendance'))
-      const yearDocs = snap.docs.filter((d) => d.id.startsWith(`${year}-`))
-      if (yearDocs.length === 0) return { ok: false, message: `No attendance records found for ${year}.` }
-      // Counted before the sweep, because afterwards there is nothing left to count.
-      const sheets = new Set()
-      yearDocs.forEach((d) => Object.keys(d.data().activities || {}).forEach((id) => sheets.add(id)))
-      await archiveYearDocs(yearDocs, year)
-      setAttendance({})
-      setAttendanceVerifiers({})
-      setAttendanceVenues({})
-      setAttendanceActivities({})
-      // The freeze flag rides in this map too, so an archived year must not leave a
-      // frozen day in memory with no document behind it.
-      setAttendanceStamp({})
-      fetchedAttendanceKeys.current.clear()
-      // Names both, the way the row above the button does. A super admin who has just
-      // been told "148 records · 31 activity sheets" and then reads "Archived 148 records"
-      // is entitled to wonder where the sheets went.
-      return { ok: true, message: `Archived ${yearDocs.length} record${yearDocs.length !== 1 ? 's' : ''}`
-        + `${sheets.size ? ` and ${sheets.size} activity sheet${sheets.size !== 1 ? 's' : ''}` : ''} for ${year}.` }
-    } catch (e) {
-      return { ok: false, message: 'Archive failed. Try again.' }
-    }
-  }
 
   // ---- Freezing the morning record ------------------------------------------
   // The Today tab is the morning roll call: taken once, reported to higher, then it
@@ -4746,109 +3095,13 @@ export default function App() {
   // never attempted and the app can explain itself. freezeOK() in firestore.rules is the
   // other, and it is what makes the freeze true rather than merely presented.
 
-  // Who on this platoon has no status at all today. Unmarked means NO status — a man
-  // whose certificate is uploaded but not yet confirmed lives in `docs` with no `entries`
-  // row, so he counts here, and that is intended: verify first, then report.
-  function unmarkedOn(day, groupId) {
-    const entries = attendance[`${day}__${groupId}`] || {}
-    return rosterOn(day, groupId).filter((p) => !entries[p.id]).length
-  }
 
-  // Every platoon that is short, named. The control says which one is blocking and by how
-  // many rather than just refusing — and the gate is per platoon, so one short platoon
-  // stops the whole company rather than freezing four and leaving one.
-  function freezeBlockers(day) {
-    return groups
-      .map((g) => ({ id: g.id, name: g.name, unmarked: unmarkedOn(day, g.id) }))
-      .filter((x) => x.unmarked > 0)
-  }
 
-  // One platoon's freeze, added to a caller's batch so the whole company goes in one
-  // atomic write.
-  //
-  // The stamp is computed BEFORE `frozen` reaches the document — this is the day's LAST
-  // stamp, and from the moment the flag lands dayStamp() returns null for it forever. Get
-  // the order wrong and the freeze seals an empty record: no roster, no reporting
-  // locations, and a board that reads back as a day nobody was on.
-  function freezeInto(batch, day, groupId) {
-    const stamp = dayStamp(day, groupId) || {}
-    batch.set(doc(db, 'attendance', `${day}__${groupId}`), {
-      groupId, date: day, year: parseInt(day.slice(0, 4), 10),
-      ...stamp,
-      frozen: true,
-      frozenBy: account.id,
-      frozenByName: account.displayName || account.username || '',
-      frozenAt: Date.now(),
-      unfrozen: [],
-    }, { merge: true })
-    // Members never read the board (attendance-self-card-model), so each man carries a
-    // single field computed for him. mirrorSelfFreeze and NOT mirrorSelfCard — see the
-    // comment on the writer.
-    rosterOn(day, groupId).forEach((p) => mirrorSelfFreeze(batch, p.id, day, false))
-  }
 
-  // The reporting moment is company-wide even though the records are not. Iterates
-  // `groups`, so ATTACH freezes with the four platoons and a sixth added later comes
-  // along for free.
-  //
-  // WRITE BUDGET: one document per platoon plus one card per man — five platoons of ~14
-  // is ~75 writes, well inside Firestore's 500-per-batch limit. Split into chunks before
-  // the company outgrows it.
-  async function freezeAllPlatoons() {
-    const day = todayISO()
-    const blockers = freezeBlockers(day)
-    if (blockers.length) return { ok: false, blockers }
-    const batch = writeBatch(db)
-    groups.forEach((g) => freezeInto(batch, day, g.id))
-    await batch.commit()
-    return { ok: true }
-  }
 
-  // Lifting the freeze outright, for the whole platoon. `unfrozen` goes with it — a list
-  // of exemptions from a lock that no longer exists would come back to life the next time
-  // the day were frozen.
-  async function unfreezeDay(day, groupId) {
-    const batch = writeBatch(db)
-    batch.set(doc(db, 'attendance', `${day}__${groupId}`), { frozen: false, unfrozen: [] }, { merge: true })
-    rosterOn(day, groupId).forEach((p) => mirrorSelfFreeze(batch, p.id, null))
-    await batch.commit()
-  }
 
-  // Reopening ONE man, which is the case this feature exists for: RSI/RSO who comes back
-  // with a certificate, LATE who arrives, OFF who returns. He becomes editable by a super
-  // admin or his own platoon admin, and his own upload prompt comes back — but NOT his
-  // status tiles. A man does not put himself back on a figure that has been reported.
-  //
-  // arrayUnion rather than writing the whole list: two super admins reopening two
-  // different men in the same minute must not overwrite each other.
-  async function setPersonFrozen(day, groupId, accountId, frozen) {
-    const batch = writeBatch(db)
-    batch.set(doc(db, 'attendance', `${day}__${groupId}`), {
-      unfrozen: frozen ? arrayRemove(accountId) : arrayUnion(accountId),
-    }, { merge: true })
-    mirrorSelfFreeze(batch, accountId, day, !frozen)
-    await batch.commit()
-  }
 
-  async function shareMyLocation() {
-    const pos = await getPosition()
-    await setDoc(doc(db, 'adminLocations', account.id), { lat: pos.lat, lng: pos.lng, updatedAt: Date.now() })
-    return pos
-  }
 
-  async function handleShare() {
-    setShareLoc({ state: 'locating', message: '' })
-    try {
-      await shareMyLocation()
-      setShareLoc({ state: 'success', message: 'Shared just now.' })
-    } catch (err) {
-      // The pill IS the error now — it turns red and wears the fix as its label, so
-      // there is no hint line under the toolbar to read. Codes 1 and 2 are the ones
-      // actually about location services (denied / position unavailable); a timeout
-      // or anything else just needs another tap.
-      setShareLoc({ state: 'error', message: (err && (err.code === 1 || err.code === 2)) ? 'Turn on Location' : 'Retry' })
-    }
-  }
 
   useEffect(() => {
     if (!account?.isAdmin || tab !== 'today' || selectedDate !== todayISO()) return undefined
@@ -4856,10 +3109,6 @@ export default function App() {
     return () => clearInterval(t)
   }, [account, tab, selectedDate])
 
-  async function saveCheckinSettings(next) {
-    setCheckinSettings(next)
-    try { await setDoc(doc(db, 'settings', 'checkin'), next, { merge: true }) } catch (e) {}
-  }
 
   // No optimistic set: the listener above is what moves the UI, and a write the
   // rules refuse must not leave the switch looking flipped when it hasn't moved.
@@ -4867,354 +3116,18 @@ export default function App() {
     try { await setDoc(doc(db, 'appAccess', 'lockdown'), { lockdown: !!on }, { merge: true }) } catch (e) {}
   }
 
-  // radiusMeters belongs to the venue — a range or parade square doesn't fit an
-  // office-sized radius. Required on save; DEFAULT_RADIUS only covers legacy docs
-  // written before it was mandatory.
-  async function addSavedLocation(label, lat, lng, radiusMeters) {
-    if (!label || !label.trim()) return { ok: false, message: LOC_NAME_REQUIRED_MSG }
-    if (lat == null || lng == null || Number.isNaN(lat) || Number.isNaN(lng)) return { ok: false, message: 'Set a valid Coordinate first.' }
-    await addDoc(collection(db, 'locations'), { label: label.trim(), lat, lng, order: savedLocations.length, radiusMeters: radiusMeters || DEFAULT_RADIUS })
-    return { ok: true }
-  }
 
-  async function updateSavedLocation(id, label, lat, lng, radiusMeters) {
-    if (!label || !label.trim()) return { ok: false, message: LOC_NAME_REQUIRED_MSG }
-    if (lat == null || lng == null || Number.isNaN(lat) || Number.isNaN(lng)) return { ok: false, message: 'Set a valid Coordinate first.' }
-    try { await setDoc(doc(db, 'locations', id), { label: label.trim(), lat, lng, radiusMeters: radiusMeters || DEFAULT_RADIUS }, { merge: true }); return { ok: true } } catch (e) { return { ok: false, message: 'Could not save.' } }
-  }
 
-  async function removeSavedLocation(id) {
-    try {
-      await deleteDoc(doc(db, 'locations', id))
-      const affectedGroups = groups.filter((g) => g.locationId === id)
-      const affectedAccounts = accounts.filter((a) => a.locationId === id)
-      // A deleted venue must not linger in anyone's schedule either, or the
-      // outlook would show a nameless row and check-in would resolve to nothing.
-      const scheduledGroups = groups.filter((g) => (g.venueSchedule || []).some((e) => e.locationId === id))
-      // The company list is duplicated across every platoon doc, so one run referencing the
-      // deleted venue means every copy needs the strip — and writing all of them is what keeps
-      // the copies identical.
-      const companyDirty = groups.some((g) => (g.companySchedule || []).some((e) => e.locationId === id))
-      await Promise.all([
-        ...affectedGroups.map((g) => setDoc(doc(db, 'groups', g.id), { locationId: null }, { merge: true })),
-        ...affectedAccounts.map((a) => setDoc(doc(db, 'accounts', a.id), { locationId: null }, { merge: true })),
-        ...scheduledGroups.map((g) => setDoc(doc(db, 'groups', g.id), {
-          venueSchedule: pruneVenueSchedule((g.venueSchedule || []).filter((e) => e.locationId !== id)),
-        }, { merge: true })),
-        ...(companyDirty ? groups.map((g) => setDoc(doc(db, 'groups', g.id), {
-          companySchedule: pruneVenueSchedule((g.companySchedule || []).filter((e) => e.locationId !== id)),
-        }, { merge: true })) : []),
-      ])
-    } catch (e) {}
-  }
 
-  async function reorderLocation(id, direction) {
-    const idx = savedLocations.findIndex((l) => l.id === id)
-    const swapIdx = idx + direction
-    if (idx === -1 || swapIdx < 0 || swapIdx >= savedLocations.length) return
-    const a = savedLocations[idx]
-    const b = savedLocations[swapIdx]
-    await Promise.all([
-      setDoc(doc(db, 'locations', a.id), { order: swapIdx }, { merge: true }),
-      setDoc(doc(db, 'locations', b.id), { order: idx }, { merge: true }),
-    ])
-  }
 
-  // The whole schedule for one platoon, rewritten. Callers pass the array they
-  // want (add/edit/remove is done in the UI against the group's current array).
-  async function setGroupVenueSchedule(groupId, entries) {
-    try { await setDoc(doc(db, 'groups', groupId), { venueSchedule: pruneVenueSchedule(entries) }, { merge: true }) } catch (e) {}
-  }
 
-  // The company's dated list, rewritten identically onto every platoon doc — there is no
-  // company document to hold it, the same reason the ICT dates are denormalized this way. One
-  // batch, one write per platoon, and only on add/edit/delete; a day of marking still touches
-  // nothing but the day document already open.
-  // The standing company location. Its own writer rather than a field on saveEvent: that
-  // function belongs to the ICT Period card, which seeds a draft when it opens and writes it
-  // back on save — so with the location riding along, editing the location anywhere else and
-  // then saving the ICT dates would silently put the stale seeded value back. Same fan-out
-  // onto every platoon doc as the schedule below, for the same reason.
-  async function setCompanyLocation(locationId) {
-    try {
-      const batch = writeBatch(db)
-      for (const g of groups) batch.set(doc(db, 'groups', g.id), { locationId: locationId || null }, { merge: true })
-      await batch.commit()
-    } catch (e) {}
-  }
 
-  // Everything the Reporting Location card does. It sits with the other Today-tab state
-  // because the card is opened from the header there, and every writer it needs (
-  // setCompanyLocation, setCompanySchedule) is already here.
-  function openCompanyLoc() {
-    const ev = groups[0] || {}
-    // Exclude Weekends starts TICKED when there is no period yet. Almost every ICT runs
-    // Monday to Friday, so the tick is the answer nearly every time and leaving it off made
-    // the common case the one with an extra tap in it. Only for a period being set up from
-    // nothing: once one exists, the card shows what was actually chosen for it, ticked or
-    // not, because that is a decision somebody already made.
-    setIctDraft({ from: ev.eventFrom || '', to: ev.eventTo || '', skipWeekends: ev.eventFrom ? !!ev.ictSkipWeekends : true })
-    setIctMsg(''); setIctNeedsLoc(false)
-    setIctRuns(((ev.companySchedule) || []).filter((e) => e && e.locationId && e.from))
-    setCompanySchedDraft(null); setCompanySchedMsg('')
-    setCompanyLocOpen(true)
-  }
-  function closeCompanyLoc() {
-    setCompanyLocOpen(false); setCompanySchedDraft(null); setCompanySchedMsg('')
-    setIctMsg('')
-  }
-  // The card's ONE Save: the period and its reporting locations, together. They are one
-  // setup — a period whose days have nowhere to report is not a period anyone can use — so
-  // they are validated as one thing and committed as one thing.
-  //
-  // The two writes are INDEPENDENT and the order between them carries no meaning. saveEvent
-  // re-dates the Platoon/Section/Personnel overrides against the new window; it never reads
-  // or writes companySchedule, which is the list this card edits. Said plainly because the
-  // opposite was once written here.
-  async function saveIctDraft() {
-    const d = ictDraft
-    if (!d.from || !d.to) { setIctMsg('Set the ICT start and end date.'); return }
-    if (d.to < d.from) { setIctMsg('The end date is before the start date.'); return }
-    // Every day of the period has to have somewhere to report. A day inside an ICT with no
-    // reporting location is a day proximity check-in cannot run and the report cannot name a
-    // place for — so the period is not finished being set up, and Save says so rather than
-    // storing a half-built one.
-    // Both shapes of the same answer — nothing set at all, or set but not for every day —
-    // are said in the same place, under the ICT Reporting Location heading. That is where
-    // the missing thing would have been, and it is the half of the card that fixes it; the
-    // line under the dates is for what is wrong with the DATES.
-    const runs = clampRunsToPeriod(ictRuns, d.from, d.to, d.skipWeekends)
-    if (coverageGaps(runs, d.from, d.to, d.skipWeekends).length) { setIctNeedsLoc(true); return }
-    await setCompanySchedule(runs)
-    await saveEvent({ from: d.from, to: d.to, skipWeekends: d.skipWeekends })
-    setIctMsg(''); setIctNeedsLoc(false)
-  }
-  // A new run opens ON THE FIRST GAP — the days the period is still missing — so the common
-  // case is pick a place and Save. Falls back to the whole period when nothing is missing
-  // (adding a run that overwrites part of one already there), and to today when there is no
-  // period yet to sit inside.
-  function openCompanySchedDraft(entry) {
-    setCompanySchedMsg('')
-    if (entry) {
-      setCompanySchedDraft({ entryId: entry.id, locationId: entry.locationId, from: entry.from || '', to: entry.to || entry.from || '' })
-      return
-    }
-    const gap = coverageGaps(ictRuns, ictDraft.from, ictDraft.to, ictDraft.skipWeekends)[0]
-    const from = gap ? gap.from : (ictDraft.from || todayISO())
-    const to = gap ? gap.to : (ictDraft.to || ictDraft.from || todayISO())
-    setCompanySchedDraft({ entryId: null, locationId: '', from, to })
-  }
-  // Dates are required: a run without them would just be a second standing location. And
-  // they stay inside the ICT period — a run outside it covers no day that needed covering,
-  // and would sit in the list looking like it did.
-  function saveCompanySchedDraft() {
-    const d = companySchedDraft
-    if (!d.locationId) { setCompanySchedMsg(LOCATION_REQUIRED_MSG); return }
-    if (!d.from) { setCompanySchedMsg(START_DATE_REQUIRED_MSG); return }
-    if (!d.to) { setCompanySchedMsg(END_DATE_REQUIRED_MSG); return }
-    if (d.to < d.from) { setCompanySchedMsg('The end date is before the start date.'); return }
-    if (ictDraft.from && ictDraft.to && (d.from < ictDraft.from || d.to > ictDraft.to)) {
-      setCompanySchedMsg('Dates must be within the ICT Period.'); return
-    }
-    // A run that starts or ends on an excluded weekend is naming a day the exercise does not
-    // run on. Only the ENDS are checked: a run spanning a weekend in the middle is normal —
-    // the company reports somewhere for a fortnight, and the days off sit inside it.
-    if (ictDraft.skipWeekends && (isWeekend(d.from) || isWeekend(d.to))) {
-      setCompanySchedMsg(WEEKEND_EXCLUDED_MSG); return
-    }
-    // Into the DRAFT list, not into Firestore. This Save closes the sub-form; the card's own
-    // Save is what makes any of it real.
-    const entry = newScheduleEntry({ locationId: d.locationId, from: d.from, to: d.to })
-    if (d.entryId) entry.id = d.entryId
-    setIctRuns((cur) => (d.entryId ? cur.map((e) => (e.id === d.entryId ? entry : e)) : [...cur, entry]))
-    setCompanySchedDraft(null); setCompanySchedMsg(''); setIctNeedsLoc(false)
-  }
-  function removeCompanySchedEntry(entryId) {
-    setIctRuns((cur) => cur.filter((e) => e.id !== entryId))
-  }
-  async function setCompanySchedule(entries) {
-    try {
-      const batch = writeBatch(db)
-      const pruned = pruneVenueSchedule(entries)
-      for (const g of groups) batch.set(doc(db, 'groups', g.id), { companySchedule: pruned }, { merge: true })
-      await batch.commit()
-    } catch (e) {}
-  }
 
-  // Append one Platoon/Section exception to each named platoon — used by the
-  // per-platoon scheduling form (which constrains from/to to the ICT event window).
-  async function applyVenueSchedule({ locationId, from, to, groupIds, miniGroupId }) {
-    const entry = newScheduleEntry({ locationId, from, to, miniGroupId })
-    try {
-      await Promise.all((groupIds || []).map((gid) => {
-        const g = groups.find((x) => x.id === gid)
-        return setDoc(doc(db, 'groups', gid), {
-          venueSchedule: pruneVenueSchedule([...((g && g.venueSchedule) || []), entry]),
-        }, { merge: true })
-      }))
-    } catch (e) {}
-  }
 
-  // Every ICT window this platoon has had, oldest first. `eventFrom`/`eventTo` hold ONE
-  // period, so setting up the next exercise overwrites the last — and reset clears them
-  // outright. Without this, the Count calendar stops being able to tell which days of
-  // July 2025 were an ICT the moment August 2025's dates are entered, and a year-end
-  // reset wipes every past period at once. The outgoing pair is banked here first.
-  // Lives on the group doc the app already reads, so keeping the history costs nothing.
-  // OVERLAP is what tells an edit from a new exercise. A period being corrected still covers
-  // some of the days it covered a moment ago — whichever end you drag, and whichever way. The
-  // next exercise is a separate block of dates further on and touches none of them. Roy's
-  // rule: a new ICT never starts on the day the last one ended, so a single day of overlap is
-  // always an edit and never a handover.
-  //
-  // It replaced "same start date", which could only see one end of the range: correcting a
-  // typo in the START date read as setting up a new exercise and banked the old window.
-  //
-  // It matters because a banked window is not inert. It still paints its days as ICT days on
-  // the Count calendar, still leaves them tappable, and still counts towards how far forward
-  // the month arrow goes — so a period you shortened left the longer one behind and the days
-  // you had just cut off stayed live, the calendar disagreeing with the dates you had
-  // literally just typed.
-  //
-  // Self-healing, with no migration: every stale draft overlaps the period it is a draft of,
-  // so the next save of the ICT card takes them with it.
-  function withPastPeriod(g, from, to) {
-    const past = Array.isArray(g.ictPeriods) ? g.ictPeriods : []
-    // Nothing to bank, or it hasn't moved.
-    if (!g.eventFrom || !g.eventTo) return past
-    if (g.eventFrom === from && g.eventTo === to) return past
-    // An edit of the exercise already running: nothing to bank, and its older drafts go with
-    // it. Both start dates, because an edit that moved the start leaves drafts under either.
-    if (from && to && from <= g.eventTo && to >= g.eventFrom) {
-      return past.filter((p) => p.from !== g.eventFrom && p.from !== from)
-    }
-    // A genuinely different exercise — or a Reset, which passes empty dates and banks the
-    // outgoing pair on its way out. Keep one entry per start date so nothing is filed twice.
-    const kept = past.filter((p) => p.from !== from && p.from !== g.eventFrom)
-    // The weekend answer is banked WITH the period, not left on the group. One exercise can
-    // run Monday to Friday and the next straight through, and a single flag on the group
-    // would rewrite the calendar for every year already filed.
-    return [...kept, { from: g.eventFrom, to: g.eventTo, skipWeekends: !!g.ictSkipWeekends }]
-  }
 
-  // Save the ICT event — one date range + one company reporting location — to every
-  // platoon (denormalized on the group docs → zero extra reads). Any existing
-  // Platoon/Section exception and dated Personnel exception is clamped into the new
-  // window so nothing falls outside the event. Pass from/to/locationId as '' to
-  // clear. One batch keeps it atomic.
-  async function saveEvent({ from, to, skipWeekends }) {
-    const clamp = (v) => (v && from && to ? (v < from ? from : v > to ? to : v) : v)
-    // Does a dated span still touch the new window? One that overlaps is trimmed to fit.
-    // One that falls entirely outside it can't be — clamping would collapse a nine-day
-    // assignment onto a single boundary day, silently — so its dates are CLEARED and it is
-    // handed to OverrideDatesCard, which names it and holds the screen until the admin
-    // gives it a range inside the new period. Deleting it outright was built and taken back
-    // out: an override represents a decision somebody made, and a date change quietly
-    // binning it is the app throwing away work without saying so. Undated is a state that
-    // announces itself; deleted is not. Dateless spans and a cleared event window are
-    // left alone.
-    const overlaps = (f, t) => !from || !to || !f || ((t || f) >= from && f <= to)
-    try {
-      const batch = writeBatch(db)
-      for (const g of groups) {
-        const sched = ((g.venueSchedule || []).map((e) => {
-          if (!overlaps(e.from, e.to)) return { ...e, from: '', to: '' }
-          const ef = clamp(e.from), et = clamp(e.to || e.from)
-          return { ...e, from: ef, to: et < ef ? ef : et }
-        }))
-        batch.set(doc(db, 'groups', g.id), { eventFrom: from || null, eventTo: to || null, ictSkipWeekends: !!skipWeekends, venueSchedule: pruneVenueSchedule(sched), ictPeriods: withPastPeriod(g, from, to) }, { merge: true })
-      }
-      for (const a of accounts) {
-        if (a.locationId && (a.locationFrom || a.locationTo)) {
-          if (!overlaps(a.locationFrom, a.locationTo)) {
-            batch.set(doc(db, 'accounts', a.id), { locationFrom: null, locationTo: null }, { merge: true })
-            continue
-          }
-          const ef = clamp(a.locationFrom), et = clamp(a.locationTo)
-          batch.set(doc(db, 'accounts', a.id), { locationFrom: ef || null, locationTo: (et && ef && et < ef ? ef : et) || null }, { merge: true })
-        }
-      }
-      await batch.commit()
-    } catch (e) {}
-  }
 
-  // Stand down every reporting-location exception for ONE platoon: its
-  // Platoon/Section entries plus its own members' personal exceptions. The ICT
-  // event and the company location are left alone.
-  //
-  // Ends them, never erases them. A past day resolves where the platoon reported
-  // out of these same entries, so deleting one that has already run would rewrite
-  // days that actually happened. Three cases, and they're exactly what the card
-  // above shows: something running (or a standing rule) is ended yesterday, so it
-  // stops from today and every day it covered still reads correctly; something not
-  // yet started is dropped, having applied to nothing; something already finished
-  // is left alone, because it is history now.
-  async function clearGroupOverrides(groupId) {
-    try {
-      const today = todayISO()
-      const yesterday = addDays(today, -1)
-      const g = groups.find((x) => x.id === groupId)
-      const batch = writeBatch(db)
-      const next = ((g && g.venueSchedule) || []).flatMap((e) => {
-        if (overrideEnded(e.from, e.to, today)) return [e]
-        if (e.from && e.from >= today) return []
-        return [{ ...e, to: yesterday }]
-      })
-      batch.set(doc(db, 'groups', groupId), { venueSchedule: pruneVenueSchedule(next) }, { merge: true })
-      for (const a of accounts) {
-        if (a.groupId !== groupId || !a.locationId) continue
-        if (overrideEnded(a.locationFrom, a.locationTo, today)) continue
-        if (a.locationFrom && a.locationFrom >= today) batch.set(doc(db, 'accounts', a.id), { locationId: null, locationFrom: null, locationTo: null }, { merge: true })
-        else batch.set(doc(db, 'accounts', a.id), { locationTo: yesterday }, { merge: true })
-      }
-      await batch.commit()
-    } catch (e) {}
-  }
 
-  // Finished overrides leave with the records they explain, not before. Called by
-  // both archive paths — the automatic sweep and the manual card.
-  async function archiveOverrides(year) {
-    const end = `${year}-12-31`
-    const batch = writeBatch(db)
-    let writes = 0
-    for (const g of groups) {
-      const kept = (g.venueSchedule || []).filter((e) => !overrideEnded(e.from, e.to, end))
-      if (kept.length !== (g.venueSchedule || []).length) { batch.set(doc(db, 'groups', g.id), { venueSchedule: kept }, { merge: true }); writes++ }
-    }
-    for (const a of accounts) {
-      if (a.locationId && overrideEnded(a.locationFrom, a.locationTo, end)) {
-        batch.set(doc(db, 'accounts', a.id), { locationId: null, locationFrom: null, locationTo: null }, { merge: true })
-        writes++
-      }
-    }
-    if (writes) await batch.commit()
-  }
 
-  // Date a batch of previously-dateless overrides in one write: each platoon's
-  // venueSchedule is rewritten once and each account once, however many rows the
-  // card is resolving. Rows carry { entryId, groupId } or { accountId }.
-  async function setOverrideDates(rows) {
-    try {
-      const batch = writeBatch(db)
-      const byGroup = new Map()
-      for (const r of rows) {
-        if (!r.entryId) continue
-        if (!byGroup.has(r.groupId)) byGroup.set(r.groupId, new Map())
-        byGroup.get(r.groupId).set(r.entryId, { from: r.from, to: r.to })
-      }
-      for (const [groupId, edits] of byGroup) {
-        const g = groups.find((x) => x.id === groupId)
-        if (!g) continue
-        const sched = (g.venueSchedule || []).map((e) => (edits.has(e.id) ? { ...e, ...edits.get(e.id) } : e))
-        batch.set(doc(db, 'groups', groupId), { venueSchedule: pruneVenueSchedule(sched) }, { merge: true })
-      }
-      for (const r of rows) {
-        if (!r.accountId) continue
-        batch.set(doc(db, 'accounts', r.accountId), { locationFrom: r.from || null, locationTo: r.to || null }, { merge: true })
-      }
-      await batch.commit()
-    } catch (e) {}
-  }
 
   async function setGroupInfo(groupId, info) {
     try { await setDoc(doc(db, 'groups', groupId), { info }, { merge: true }); return true } catch (e) { return false }
@@ -5279,18 +3192,7 @@ export default function App() {
     ])
   }
 
-  async function setAccountLocation(id, locationId, from, to) {
-    try { await setDoc(doc(db, 'accounts', id), { locationId: locationId || null, locationFrom: from || null, locationTo: to || null }, { merge: true }) } catch (e) {}
-  }
 
-  // Persist a full new status order (drag-to-reorder in the grid). Only writes
-  // docs whose order actually changed, to keep Firestore writes minimal.
-  async function setStatusOrder(orderedIds) {
-    const current = statuses.map((s) => s.id)
-    await Promise.all(orderedIds.map((id, i) =>
-      current[i] === id ? null : setDoc(doc(db, 'statuses', id), { order: i }, { merge: true })
-    ).filter(Boolean))
-  }
 
   // Full-order persisters for the other drag-to-reorder lists. Same pattern as
   // setStatusOrder: write only the docs whose order changed.
@@ -5304,12 +3206,6 @@ export default function App() {
     const current = groupFields.map((f) => f.id)
     await Promise.all(orderedIds.map((id, i) =>
       current[i] === id ? null : setDoc(doc(db, 'groupFields', id), { order: i }, { merge: true })
-    ).filter(Boolean))
-  }
-  async function setLocationOrder(orderedIds) {
-    const current = savedLocations.map((l) => l.id)
-    await Promise.all(orderedIds.map((id, i) =>
-      current[i] === id ? null : setDoc(doc(db, 'locations', id), { order: i }, { merge: true })
     ).filter(Boolean))
   }
   // Custom account fields reorder among themselves; reassign the order slots they
@@ -5427,13 +3323,6 @@ export default function App() {
   // below clear deferredFrom in their own batch for the same reason — the direct
   // write is only for an account with no group, which owns no attendance row.
   async function returnToPlatoon(id) {
-    const acc = accounts.find((a) => a.id === id)
-    const setOn = acc && acc.deferredFrom ? addDays(acc.deferredFrom, -1) : null
-    if (setOn && acc.groupId) {
-      if (acc.deferredPrev) await setStatusFor(setOn, acc.groupId, id, acc.deferredPrev, true)
-      else await clearStatusFor(setOn, acc.groupId, id)
-      return
-    }
     try { await setDoc(doc(db, 'accounts', id), { deferredFrom: deleteField(), deferredPrev: deleteField() }, { merge: true }) } catch (e) {}
   }
 
@@ -5696,126 +3585,6 @@ export default function App() {
     ])
   }
 
-  // Moving a man between platoons. Every day already recorded keeps its own stamp and is
-  // not touched — that is the whole point of stamping — so the only day that has to move
-  // with him is the one in progress. Marked at the morning roll call and moved at noon, his
-  // status goes with him: the company's Present count and the report to higher are the same
-  // before and after, and nobody has to remember to re-mark him.
-  //
-  // His name is written to formerMembers on the way out. The platoon he left keeps his
-  // records, and a basic admin there holds only his own platoon's accounts — without this
-  // the old boards would read "Former personnel" against a man who is very much still here.
-  async function moveDayRecord(id, fromGroupId, toGroupId) {
-    const date = todayISO()
-    const acc = accounts.find((a) => a.id === id) || null
-    const name = acc ? (acc.displayName || memberLabel(acc)) : ''
-    const fromKey = `${date}__${fromGroupId}`
-    // Everything the day holds about him, not just his status. A day row is four separate
-    // maps: the status, the certificate marker behind a document-backed status like MC, who
-    // QR-verified him, and where he checked in. Move the status alone and an MC uploaded
-    // this morning loses its marker — the clip, the Unverified count and his own upload
-    // prompt all read `docs`, so the certificate would still exist while the day forgot it
-    // was ever handed in.
-    //
-    // Read from FIRESTORE, not from the in-memory maps. Those only hold days the app has
-    // subscribed to — the active platoon and the admin's own — and a transfer very often
-    // moves a man out of neither. Trusting them silently found nothing to carry while the
-    // delete below went ahead anyway, which destroyed the man's record for the day. One
-    // extra read, on an action that happens rarely, buys back the only copy there is.
-    const fromSnap = fromGroupId ? await getDoc(doc(db, 'attendance', fromKey)) : null
-    const fromData = fromSnap && fromSnap.exists() ? fromSnap.data() : {}
-    const statusId = (fromData.entries || {})[id] || null
-    const docMeta = (fromData.docs || {})[id] || null
-    const verifier = (fromData.verifiers || {})[id] || null
-    const venueId = (fromData.venues || {})[id] || null
-    // The freeze spans two platoon-days here, and BOTH have to be read from Firestore for
-    // the same reason the source is: `attendanceStamp` only holds days the app subscribed
-    // to, and a transfer routinely involves a platoon this admin is watching neither of.
-    // Either side frozen leaves today alone on BOTH sides — pulling him out of a frozen
-    // source while writing him into an open destination would put him on two boards for a
-    // morning that has already been reported.
-    //
-    // Roy, 25 Aug 2026: "I only send reports from the copy report in the tally tab once in
-    // the morning, so if a person is swapped to another platoon after attendance is frozen
-    // and reported in the morning, then it is only tomorrow's morning attendance that needs
-    // to have the person swapped." Tomorrow's board is built from live accounts, so he turns
-    // up in the new platoon on his own with nothing written for it.
-    const toSnap = toGroupId ? await getDoc(doc(db, 'attendance', `${date}__${toGroupId}`)) : null
-    const frozenToday = fromData.frozen === true
-      || !!(toSnap && toSnap.exists() && toSnap.data().frozen === true)
-    const batch = writeBatch(db)
-    if (name) batch.set(doc(db, 'formerMembers', 'index'), { [id]: name }, { merge: true })
-    // Out of the old day: his entry, his document marker, and his place in the roster.
-    // Both stamps are computed with the pending move applied by hand, because `accounts`
-    // has not heard about it yet — see the `moved` argument on dayStamp().
-    if (fromGroupId && !frozenToday) {
-      batch.set(doc(db, 'attendance', fromKey), {
-        groupId: fromGroupId, date, year: parseInt(date.slice(0, 4), 10),
-        ...(dayStamp(date, fromGroupId, { id, groupId: toGroupId }) || {}),
-        entries: { [id]: deleteField() }, docs: { [id]: deleteField() },
-        ...(verifier ? { verifiers: { [id]: deleteField() } } : {}),
-        ...(venueId ? { venues: { [id]: deleteField() } } : {}),
-      }, { merge: true })
-    }
-    if (toGroupId && !frozenToday) {
-      batch.set(doc(db, 'attendance', `${date}__${toGroupId}`), {
-        groupId: toGroupId, date, year: parseInt(date.slice(0, 4), 10),
-        ...(dayStamp(date, toGroupId, { id, groupId: toGroupId }) || {}),
-        ...(statusId ? { entries: { [id]: statusId } } : {}),
-        ...(docMeta ? { docs: { [id]: docMeta } } : {}),
-        ...(verifier ? { verifiers: { [id]: verifier } } : {}),
-        ...(venueId ? { venues: { [id]: venueId } } : {}),
-      }, { merge: true })
-      // The self-card names the platoon its status belongs to, and he reads it every time
-      // he opens the app — left behind it would point him at a board he is no longer on.
-      if (statusId || docMeta) batch.set(doc(db, 'attendanceSelf', id), { date, groupId: toGroupId, ...(statusId ? { statusId } : {}), ...(docMeta ? { docMeta } : {}) }, { merge: true })
-    }
-    // A document-backed status runs as a contiguous range, so a certificate STILL IN FORCE
-    // takes the rest of its days with him. Without this an MC confirmed through Friday leaves
-    // Wednesday and Thursday sitting in the platoon he left, on days he will spend in the new
-    // one — and those days were already stamped with him on the old roster, so both boards
-    // would show him, in different places, for the same day.
-    const lastDay = docMeta && docMeta.to && docMeta.to > date ? docMeta.to : null
-    ;(lastDay ? datesBetween(addDays(date, 1), lastDay) : []).forEach((d) => {
-      if (fromGroupId) {
-        batch.set(doc(db, 'attendance', `${d}__${fromGroupId}`), {
-          groupId: fromGroupId, date: d, year: parseInt(d.slice(0, 4), 10),
-          ...(dayStamp(d, fromGroupId, { id, groupId: toGroupId }) || {}),
-          entries: { [id]: deleteField() }, docs: { [id]: deleteField() },
-        }, { merge: true })
-      }
-      if (toGroupId) {
-        batch.set(doc(db, 'attendance', `${d}__${toGroupId}`), {
-          groupId: toGroupId, date: d, year: parseInt(d.slice(0, 4), 10),
-          ...(dayStamp(d, toGroupId, { id, groupId: toGroupId }) || {}),
-          // Recorded or not, exactly as it was: an unverified certificate keeps its marker
-          // and no entry, which is what leaves it outstanding rather than quietly confirmed.
-          entries: { [id]: statusId || deleteField() },
-          docs: { [id]: docMeta },
-        }, { merge: true })
-      }
-    })
-    // Any seat he holds carries a COPY of him — name, platoon, section — frozen when he was
-    // assigned, because neither a platoon admin nor a member can resolve another platoon's
-    // man out of `accounts`. A transfer makes that copy a lie, and the manifest is the sheet
-    // somebody carries on the morning, so it is refreshed rather than left to drift until he
-    // happens to be re-seated. Only the live manifests: `movements` holds the ones still
-    // running or still to come, which is exactly the set where being wrong would matter.
-    const after = acc ? { ...acc, groupId: toGroupId, miniGroupId: '' } : null
-    MV_KINDS.map((k) => movements[k]).forEach((mv) => {
-      const seat = mv && (mv.assign || {})[id]
-      if (!seat || !after) return
-      // The seat object is REPLACED, not merged, which is how `sec` disappears — a move
-      // clears the Section, and a merge would leave the old one behind for ever.
-      const fresh = { v: seat.v, r: seat.r, n: memberLabel(after), fn: after.displayName || memberLabel(after), g: toGroupId }
-      if (after.attached) fresh.att = true
-      const next = { ...(mv.assign || {}), [id]: fresh }
-      // The riders' own crew cards carry the same copy, so they are rewritten with it.
-      writeVehicleCards(batch, mv, seat.v, next)
-      batch.update(doc(db, 'movements', mv.id), { [`assign.${id}`]: fresh })
-    })
-    await batch.commit()
-  }
 
   async function setAccountGroup(id, groupId) {
     const before = accounts.find((a) => a.id === id)
@@ -5836,10 +3605,6 @@ export default function App() {
         : { groupId: to, miniGroupId: '' }, { merge: true })
     } catch (e) {}
     await syncUserClaims(id, { groupId: to })
-    // Best-effort, and deliberately after the account write: the move itself is the thing
-    // that must not fail. A day record left un-moved shows him on the old board until
-    // someone marks either platoon again, which re-stamps both.
-    if (from !== to) { try { await moveDayRecord(id, from, to) } catch (e) {} }
   }
 
   // Mini-groups (a member subdivision inside a group) live as an embedded array on
@@ -5875,40 +3640,12 @@ export default function App() {
     await writeMiniGroups(groupId, list.map((m, i) => ({ ...m, order: i })))
   }
 
-  // A Section move rewrites today's record, the same way a platoon move does. Which Section
-  // a man was in is PART of the day's record, and that record is only refreshed when somebody
-  // marks attendance — so a move made after the morning's marking would leave the day
-  // remembering the Section he left, permanently, once the day turns into history.
-  //
-  // The day document is the same one either way, since Sections live inside a platoon: only
-  // the stamp changes — his Section, and his reporting location, which resolves through it.
-  // An in-force certificate's remaining days are rewritten too, for the reason a platoon move
-  // rewrites them: those days are already recorded and may never be marked again.
-  async function restampSectionDay(id, groupId, miniGroupId) {
-    const date = todayISO()
-    if (!groupId || !dayStamp(date, groupId, { id, miniGroupId })) return
-    // Read from Firestore rather than the in-memory day, which only holds boards this admin
-    // has open — a super admin can move a man in a platoon he is not looking at. Same call
-    // the platoon move makes, and for the same reason.
-    const snap = await getDoc(doc(db, 'attendance', `${date}__${groupId}`))
-    const docMeta = snap.exists() ? ((snap.data().docs || {})[id] || null) : null
-    const lastDay = docMeta && docMeta.to && docMeta.to > date ? docMeta.to : null
-    const batch = writeBatch(db)
-    ;[date, ...(lastDay ? datesBetween(addDays(date, 1), lastDay) : [])].forEach((d) => {
-      batch.set(doc(db, 'attendance', `${d}__${groupId}`), {
-        groupId, date: d, year: parseInt(d.slice(0, 4), 10),
-        ...(dayStamp(d, groupId, { id, miniGroupId }) || {}),
-      }, { merge: true })
-    })
-    await batch.commit()
-  }
 
   async function setAccountMiniGroup(id, miniGroupId) {
     const before = accounts.find((a) => a.id === id) || null
     const from = before ? (before.miniGroupId || '') : ''
     const to = miniGroupId || ''
     try { await setDoc(doc(db, 'accounts', id), { miniGroupId: to }, { merge: true }) } catch (e) {}
-    if (before && from !== to) { try { await restampSectionDay(id, before.groupId || '', to) } catch (e) {} }
   }
 
   // Reorder a member within its (group, mini-group) bucket. Persists a normalized
@@ -5939,19 +3676,6 @@ export default function App() {
       requiresDoc: !!requiresDoc,
       docLabel: requiresDoc ? ((docLabel || '').trim() || DEFAULT_DOC_LABEL) : '',
     }
-  }
-  async function addStatus(label, color, hidden, requiresDoc, docLabel) {
-    if (!label.trim()) return
-    await addDoc(collection(db, 'statuses'), { label: label.trim(), color, order: statuses.length, hidden: !!hidden, ...docFields(requiresDoc, docLabel) })
-  }
-  async function removeStatus(id) { await deleteDoc(doc(db, 'statuses', id)) }
-  // stopsAttending and locked are deliberately absent from both writers: they
-  // belong to DEFER and MC, which are locked out of this editor entirely.
-  async function renameStatus(id, label, color, hidden, requiresDoc, docLabel) {
-    if (!label.trim()) return
-    const patch = { label: label.trim(), hidden: !!hidden, ...docFields(requiresDoc, docLabel) }
-    if (color) patch.color = color
-    await updateDoc(doc(db, 'statuses', id), patch)
   }
 
   // Platoons that have somebody in them on the day being looked at. Costs no read —
@@ -6086,82 +3810,6 @@ export default function App() {
     return accounts.filter((a) => (a.groupId || '') === groupId && activeOn(a, day))
   }
 
-  // The Count tab's freeze state. `freezeBlockers` walks every platoon, so this is the
-  // company answer rather than the active tab's.
-  const fmcFrozen = account.isSuperAdmin && groups.length > 0 && groups.every((g) => isFrozen(todayISO(), g.id))
-  const freezeBlocked = account.isSuperAdmin && !fmcFrozen ? freezeBlockers(todayISO()) : []
-  function disarmFreezeAll() {
-    confirmFreezeAllRef.current = false
-    clearTimeout(confirmFreezeAllTimer.current)
-    setConfirmFreezeAll(false)
-  }
-  async function handleFreezeAll() {
-    // The blocked chip is NOT armed: it opens the reason card, which changes nothing and
-    // needs no confirming. Only the tap that actually freezes gets the second one.
-    if (freezeBlocked.length) { disarmFreezeAll(); setFreezeBlockedCard(freezeBlocked); return }
-    if (!confirmFreezeAllRef.current) {
-      confirmFreezeAllRef.current = true
-      setConfirmFreezeAll(true)
-      clearTimeout(confirmFreezeAllTimer.current)
-      confirmFreezeAllTimer.current = setTimeout(() => {
-        confirmFreezeAllRef.current = false
-        setConfirmFreezeAll(false)
-      }, 3000)
-      return
-    }
-    disarmFreezeAll()
-    setFreezing(true)
-    try {
-      const res = await freezeAllPlatoons()
-      if (!res.ok) setFreezeBlockedCard(res.blockers)
-    } finally { setFreezing(false) }
-  }
-
-  const superAdminTotal = account.isSuperAdmin && statuses.length > 0 ? (() => {
-    const primaryStatusId = statuses[0].id
-    const day = selectedDate
-    let totalPresent = 0
-    let totalMembers = 0
-    let marked = 0
-    // Every status across every platoon, for the bar's segments and the chips under it.
-    const counts = {}
-    // Attached personnel never enter a status count: an Outfield chip reading 32 has to
-    // be 32 of the company's own men or it cannot be reported as such. What they enter,
-    // while an exercise is running, is the STRENGTH — the denominator, the percentage and
-    // a segment of their own on the bar. So every chip stays company-only and the chips
-    // still add up to the total, with ATTACHED as one of them.
-    const attachedCounts = {}
-    let attachedMarked = 0
-    let attachedInStrength = 0
-    const onExercise = outfieldStatusOn(day)
-    groups.forEach((g) => {
-      const entries = attendance[`${day}__${g.id}`] || {}
-      const active = rosterOn(day, g.id)
-      active.filter((a) => a.attached).forEach((a) => {
-        const sid = entries[a.id]
-        if (sid) { attachedCounts[sid] = (attachedCounts[sid] || 0) + 1; attachedMarked += 1 }
-        if (onExercise && sid === onExercise) attachedInStrength += 1
-      })
-      const groupMembers = active.filter((a) => !a.attached)
-      totalMembers += groupMembers.length
-      totalPresent += groupMembers.filter((a) => entries[a.id] === primaryStatusId).length
-      groupMembers.forEach((a) => {
-        const sid = entries[a.id]
-        if (sid) { counts[sid] = (counts[sid] || 0) + 1; marked += 1 }
-      })
-    })
-    // How much of the roll call is DONE, not how many turned up: the number reaches 100%
-    // when every person has a status against their name, whatever that status is. It is
-    // the coloured part of the bar below it, so the two always agree.
-    // Counted before the attached men are added in, so "unmarked" stays what it says:
-    // the company's own men with nothing against their name. An attached man on the
-    // exercise is marked by definition — that is what put him in the strength.
-    const unmarked = Math.max(0, totalMembers - marked)
-    totalMembers += attachedInStrength
-    marked += attachedInStrength
-    const pct = totalMembers > 0 ? Math.round((marked / totalMembers) * 100) : 0
-    return { totalPresent, totalMembers, pct, counts, unmarked, attachedCounts, attachedMarked, attachedInStrength }
-  })() : null
 
   // The morning count as a message you can paste into WhatsApp. `*stars*` are its bold
   // markers; everything else is plain text so it survives being pasted anywhere else.
@@ -6361,29 +4009,6 @@ export default function App() {
   // live there and have gone with the merge, because one tab cannot hold two dates and the
   // calendar on the day screen is where the day is chosen now.
   const dateNavStatic = !!openScreen
-  // The sheet on screen, resolved here because the bar that names it is in the nav bar.
-  // `activityLast` is the one the fallback needs: switching platoons on a company sheet
-  // leaves the lookup empty for the moment before the new platoon's day document lands, and
-  // the bar blinking out of the header is worse than a roster that reads empty for a frame
-  // — which is the truth at that instant anyway.
-  const activityFound = activitiesOpen && isAdmin && activityOpen
-    ? (activitiesFor(selectedDate, activeGroupId).find((a) => a.id === activityOpen) || null) : null
-  if (activityFound) activityLast.current = activityFound
-  const openAct = activityFound
-    || (activityOpen && activityScope === 'company' && activityLast.current && activityLast.current.id === activityOpen
-      ? activityLast.current : null)
-
-  // The same formula ActivityView uses for `offRoster`, and the two have to agree: a man is
-  // addable when the DAY did not put him on the roster (so `added` is stripped — a man you
-  // already added must not be offered again) and he has no tick of his own. Duplicated
-  // rather than lifted because the card is built down there off the full list and this
-  // needs only the count.
-  const openOffRoster = activityFound ? (() => {
-    const ticked = activityFound.entries || {}
-    const byDay = activityRoster(selectedDate, activeGroupId, { ...activityFound, added: {} })
-    return accounts.filter((a) => (a.groupId || '') === activeGroupId && activeOn(a, selectedDate)
-      && !byDay.some((r) => r.id === a.id) && !ticked[a.id]).length
-  })() : 0
   // Whether a selector comes next INSIDE the nav bar, which is what the toolbar's bottom
   // margin is spacing itself from. Today only now: the Activity tab's selector moved below
   // the separator, so what follows the toolbar there is the sheet's summary card instead —
@@ -6521,22 +4146,6 @@ export default function App() {
   // Today only, and for the reason the old card gave: sharing a location and scanning
   // a QR both write to the CURRENT day whatever date is on screen, so on a past day
   // they would quietly do something else.
-  // Today's freeze for the platoon on screen. Drives the header banner and stands the
-  // admin toolbar down: Enable Check-In and Scan QR both write a status, and there is
-  // nothing on a reported morning for either of them to write.
-  const todayFrozen = isFrozen(todayISO(), activeGroupId)
-  // Today's board, and an activity roster: the same pair of controls, in the same place, for
-  // the same job. Enable Check-In is one share of the admin's location and every check-in
-  // on screen needs it; Scan QR marks whoever is in front of you. An open sheet is the
-  // other place both of those get used, and walking back to Today to start the share was
-  // the whole cost of not having them here.
-  //
-  // The freeze does not gate the activity pair. A frozen morning has been reported and
-  // there is nothing left on it to write — but a sheet is not the morning, and a night roll
-  // call is marked hours after the day is frozen. Today, though, for both: a share and a
-  // scan act on the moment, whatever date the screen is showing.
-  const showAdminTools = isAdmin && ((todayBoard && selectedDate === todayISO() && !todayFrozen)
-    || (activitiesOpen && !!activityOpen && selectedDate === todayISO()))
 
   return (
     <div className="screen">
@@ -6627,29 +4236,6 @@ export default function App() {
                 the answer to "why can my men not see this yet". */}
             {account.isSuperAdmin && (
               <BannerChip onClick={() => setMovementPublished(movements[mvKind].id, true)} style={{ background: DRAFT_TINT, color: DRAFT_INK }}>Publish</BannerChip>
-            )}
-          </div>
-        )}
-        {/* The morning roll call has gone up the chain. Unlike Lockdown, which rides every
-            tab because it governs the whole app, this governs ONE board and appears on that
-            board. The Count tab says the same thing in its own language — a solid Frozen
-            pill on the company card — and no other tab has anything to do with the roll
-            call. Members see it too: it is the answer to "where did Check-In go".
-            The chip is the super admin's; a platoon admin sees the bar alone, because the
-            bar is the answer to "why can I not touch this". BannerChip sizes itself to
-            the longest banner word in the font the device is really using, so this bar
-            and Lockdown's come out the same length when a super admin has both up.
-            frozenByName / frozenAt are stored on the day document but deliberately not
-            rendered: the banner already says the day is frozen and the time is not
-            something anyone acts on. */}
-        {todayBoard && selectedDate === todayISO() && todayFrozen && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 8px' }}>
-            <span style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, minWidth: 0, padding: '8px 10px', borderRadius: 10, background: FROZEN_TINT, border: BANNER_EDGE, color: FROZEN_INK }}>
-              <Snowflake size={16} color={FROZEN_INK} style={{ flexShrink: 0 }} />
-              <span style={{ minWidth: 0, fontSize: 12, fontWeight: 500, color: FROZEN_INK, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Attendance Frozen</span>
-            </span>
-            {account.isSuperAdmin && (
-              <BannerChip onClick={() => { setUnfreezePicks((dayFreeze(todayISO(), activeGroupId) || {}).unfrozen || []); setUnfreezeList(true) }} style={{ background: FROZEN_TINT, color: FROZEN_INK }}>Unfreeze</BannerChip>
             )}
           </div>
         )}
@@ -6870,24 +4456,15 @@ export default function App() {
             reorderGroup={reorderGroup} setGroupOrder={setGroupOrder} setAccountGroup={setAccountGroup}
             addMiniGroup={addMiniGroup} renameMiniGroup={renameMiniGroup} removeMiniGroup={removeMiniGroup} reorderMiniGroup={reorderMiniGroup} setMiniGroupOrder={setMiniGroupOrder}
             setAccountMiniGroup={setAccountMiniGroup} reorderMember={reorderMember}
-            addStatus={addStatus} removeStatus={removeStatus} renameStatus={renameStatus} setStatusOrder={setStatusOrder} saveCheckinSettings={saveCheckinSettings}
             lockdown={lockdown} saveLockdown={saveLockdown}
             setAccountPassword={setAccountPassword}
             setAccountDisplayName={setAccountDisplayName} setAccountNickname={setAccountNickname} setAccountUsername={setAccountUsername}
             renameMigratedAccount={renameMigratedAccount}
             deviceLogins={live ? deviceLogins : {}} clearDeviceLock={live ? clearDeviceLock : SWIPE_NOOP}
             setLockoutsOpen={live ? setLockoutsOpen : SWIPE_NOOP}
-            savedLocations={savedLocations} locationsReady={locationsReady} addSavedLocation={addSavedLocation} updateSavedLocation={updateSavedLocation}
-            removeSavedLocation={removeSavedLocation} reorderLocation={reorderLocation} setLocationOrder={setLocationOrder}
             setGroupInfo={setGroupInfo}
-            setGroupVenueSchedule={setGroupVenueSchedule} applyVenueSchedule={applyVenueSchedule}
-            clearGroupOverrides={clearGroupOverrides}
-            setCompanyLocation={setCompanyLocation}
             groupFields={groupFields} addGroupField={addGroupField} removeGroupField={removeGroupField} reorderGroupField={reorderGroupField} setGroupFieldOrder={setGroupFieldOrder} renameGroupField={renameGroupField}
             accountFields={accountFields} addAccountField={addAccountField} removeAccountField={removeAccountField} reorderAccountField={reorderAccountField} setAccountFieldOrder={setAccountFieldOrder} renameAccountField={renameAccountField} setAccountFieldEditable={setAccountFieldEditable} setAccountInfo={setAccountInfo} setAccountRole={setAccountRole}
-            setAccountLocation={setAccountLocation}
-            archiveAttendance={archiveAttendance}
-            addActivity={addActivity}
             adminSubTab={sub} setAdminSubTab={live ? setAdminSubTab : SWIPE_NOOP}
           />
           )
@@ -6919,126 +4496,6 @@ export default function App() {
           <TabBtn key={t.id} active={tab === t.id} onClick={() => setTab(t.id)} icon={t.icon} label={t.label} size={tabIconSize} />
         ))}
       </div>
-      {/* Why the roll call cannot be frozen yet. Reached ONLY from the grey chip — when
-          everyone is marked the chip freezes outright and this never appears. Titled after
-          the action rather than the problem, because it is the same card whether one
-          platoon is short or four. Only the short platoons are listed, so on a normal
-          morning it is a row or two. The X is the whole close affordance, matching the
-          status picker; a second Close button underneath said it twice. */}
-      {shownFreezeBlocked && createPortal(
-        <div className={`rc-modal-overlay${freezeBlockedClosing ? ' rc-sheet-closing' : ''}`} style={SHEET_OVERLAY_STYLE} onClick={() => setFreezeBlockedCard(null)}>
-          <SheetPanel onClose={() => setFreezeBlockedCard(null)} style={SHEET_SHELL_STYLE}>
-            <div style={{ ...SHEET_HEADER_STYLE, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-              {/* The same grey snowflake as the chip that opened it, so the card reads as
-                  that pill expanded rather than a second, different thing. */}
-              <span style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, fontSize: 16, fontWeight: 600 }}>
-                <Snowflake size={20} color="var(--text-secondary)" style={{ flexShrink: 0 }} />Freeze Attendance
-              </span>
-              <button aria-label="Close" onClick={() => setFreezeBlockedCard(null)} style={{ background: 'none', border: 'none', color: 'var(--red)', display: 'flex', padding: 4, flexShrink: 0, cursor: 'pointer' }}><X size={22} /></button>
-            </div>
-            <div style={SHEET_BODY_STYLE}>
-              <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-secondary)' }}>Set a status for everyone before attendance can be frozen.</p>
-              {/* A grouped .list-row block inside a plain rounded clip — the app's one way
-                  of drawing a list inside a sheet (see the names sheet). NOT a .card: that
-                  brings its own padding, background and border, and reads as a second box
-                  sitting inside the sheet rather than as the sheet's own list. */}
-              <div style={{ borderRadius: 14, overflow: 'hidden' }}>
-                {shownFreezeBlocked.map((b) => (
-                  <div key={b.id} className="list-row">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: 1, minWidth: 0 }}>
-                      <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.name}</span>
-                    </div>
-                    <span style={{ flexShrink: 0, marginLeft: 10, fontSize: 13, fontWeight: 600, color: 'var(--orange)' }}>{b.unmarked} unmarked</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </SheetPanel>
-        </div>,
-        document.body
-      )}
-      {/* Reopening several men at once, off the banner chip. Every man on the platoon is
-          listed — no pre-filter and no "show all". A platoon is ~14 names, so a filter
-          would be a second thing to understand for no gain. Header and button are pinned
-          and the names scroll between them, so a long list cannot carry either away. */}
-      {shownUnfreezeList && createPortal(
-        <div className={`rc-modal-overlay${unfreezeListClosing ? ' rc-sheet-closing' : ''}`} style={SHEET_OVERLAY_STYLE} onClick={() => setUnfreezeList(false)}>
-          <SheetPanel onClose={() => setUnfreezeList(false)} style={SHEET_SHELL_STYLE}>
-            <div style={{ ...SHEET_HEADER_STYLE, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-              <p style={{ margin: 0, fontSize: 13, color: 'var(--text-secondary)' }}>Unfreeze <span style={{ opacity: 0.5 }}>|</span> <span style={{ color: 'var(--text)', fontWeight: 600 }}>{groups.find((g) => g.id === activeGroupId)?.name || ''}</span></p>
-              <button aria-label="Close" onClick={() => setUnfreezeList(false)} style={{ background: 'none', border: 'none', color: 'var(--red)', display: 'flex', padding: 4, flexShrink: 0, cursor: 'pointer' }}><X size={22} /></button>
-            </div>
-            <div style={{ ...SHEET_BODY_STYLE, paddingBottom: 14 }}>
-              <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-secondary)' }}>Tick to unfreeze, untick to freeze.</p>
-              <div style={{ borderRadius: 14, overflow: 'hidden' }}>
-                {groupByMiniGroup(rosterOn(todayISO(), activeGroupId), groups.find((g) => g.id === activeGroupId)?.miniGroups || []).flatMap((sec) => sec.members).map((p) => {
-                  const st = statuses.find((s) => s.id === (attendance[`${todayISO()}__${activeGroupId}`] || {})[p.id]) || null
-                  const on = unfreezePicks.includes(p.id)
-                  return (
-                    <button key={p.id} type="button" className="list-row" onClick={() => setUnfreezePicks((prev) => (prev.includes(p.id) ? prev.filter((x) => x !== p.id) : [...prev, p.id]))}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: 1, minWidth: 0 }}>
-                        <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{memberLabel(p)}</span>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, marginLeft: 10 }}>
-                        {st && <span style={{ display: 'flex', alignItems: 'center', padding: '5px 11px', borderRadius: 999, background: st.color, color: readableInk(st.color), fontSize: 12, fontWeight: 600 }}>{st.label}</span>}
-                        <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, borderRadius: 999, border: `1.5px solid ${on ? 'var(--blue)' : 'var(--separator)'}`, background: on ? 'var(--blue)' : 'transparent', color: '#FFFFFF' }}>
-                          {on && <Check size={15} strokeWidth={3} />}
-                        </span>
-                      </div>
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-            {/* Commits the DIFFERENCE, so the sheet re-locks as well as reopens: a man
-                already exempt opens with his tick on, and clearing it puts him back under
-                the freeze. Untouched men cost no write. */}
-            <div style={{ flexShrink: 0, padding: '0 16px 28px' }}>
-            <button className="btn-primary" disabled={freezing} style={{ width: '100%' }}
-              onClick={async () => {
-                setFreezing(true)
-                const before = (dayFreeze(todayISO(), activeGroupId) || {}).unfrozen || []
-                try {
-                  for (const p of rosterOn(todayISO(), activeGroupId)) {
-                    const want = unfreezePicks.includes(p.id)
-                    if (want !== before.includes(p.id)) await setPersonFrozen(todayISO(), activeGroupId, p.id, !want)
-                  }
-                } finally { setFreezing(false); setUnfreezeList(false) }
-              }}>Done</button>
-            </div>
-          </SheetPanel>
-        </div>,
-        document.body
-      )}
-      {/* The one-man case, which is the common one: a bloke back from the doctor. A CENTRE
-          DIALOG rather than a sheet, because a sheet says "here is a list to work through"
-          and this is one decision. Titled with the name alone — the icon and the button
-          either side of it already say what it does, twice. */}
-      {shownUnfreezeOne && createPortal(
-        <div className={`rc-modal-overlay${unfreezeOneClosing ? ' rc-modal-closing' : ''}`} style={{ ...MODAL_OVERLAY_STYLE, zIndex: 300 }} onClick={() => setUnfreezeOne(null)}>
-          <div style={{ background: 'var(--card)', border: '1px solid var(--card-border)', borderRadius: 16, overflow: 'hidden', display: 'flex', flexDirection: 'column' }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px 6px', borderBottom: '1px solid var(--separator)', flexShrink: 0 }}>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, fontSize: 16, fontWeight: 600 }}>
-                <Snowflake size={18} color="var(--blue)" style={{ flexShrink: 0 }} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{shownUnfreezeOne.name}</span>
-              </span>
-              <button aria-label="Close" onClick={() => setUnfreezeOne(null)} style={{ background: 'none', border: 'none', color: 'var(--red)', display: 'flex', padding: 4, flexShrink: 0, cursor: 'pointer' }}><X size={20} /></button>
-            </div>
-            <div style={{ padding: '14px 16px 16px' }}>
-              <p style={{ margin: 0, fontSize: 14, color: 'var(--text-secondary)', lineHeight: 1.45 }}>Unfreeze to change status.</p>
-            </div>
-            <div style={{ padding: '12px 16px 16px', borderTop: '1px solid var(--separator)', flexShrink: 0 }}>
-              <button className="btn-primary" disabled={freezing} style={{ width: '100%' }}
-                onClick={async () => {
-                  setFreezing(true)
-                  try { await setPersonFrozen(todayISO(), activeGroupId, shownUnfreezeOne.id, false) }
-                  finally { setFreezing(false); setUnfreezeOne(null) }
-                }}>Unfreeze</button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
       {movementSetupOpen && (
         <PopupCard title="Vehicle Manifest" icon={Truck} open maxHeight="80vh" trigger={<span />}
           onOpen={() => {}}
@@ -7246,7 +4703,6 @@ function LoginScreen({ onLogin, seedError, theme, setTheme, devLogin }) {
         <button className="btn-primary" style={{ width: '100%' }} onClick={submit} disabled={busy}>{busy ? 'Signing in…' : 'Sign In'}</button>
         {/* DEV ONLY: quick-login shortcuts. Remove before launch. */}
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <button className="btn-secondary" style={{ flex: 1 }} onClick={() => devLogin('superAdmin')}>Dev: Super Admin</button>
           <button className="btn-secondary" style={{ flex: 1 }} onClick={() => devLogin('admin')}>Dev: Admin</button>
           <button className="btn-secondary" style={{ flex: 1 }} onClick={() => devLogin('user')}>Dev: User</button>
         </div>
@@ -9905,17 +7361,15 @@ function PasswordInput({ value, onChange, onBlur, placeholder, autoComplete }) {
 }
 
 function AdminView({
-  accounts, groups, statuses, checkinSettings, account,
-  createAccount, removeAccount, returnToPlatoon, addGroup, removeGroup, renameGroup, reorderGroup, setGroupOrder, setAccountGroup, addStatus, removeStatus, renameStatus, setStatusOrder,
+  accounts, groups, account,
+  createAccount, removeAccount, returnToPlatoon, addGroup, removeGroup, renameGroup, reorderGroup, setGroupOrder, setAccountGroup,
   addMiniGroup, renameMiniGroup, removeMiniGroup, reorderMiniGroup, setMiniGroupOrder, setAccountMiniGroup, reorderMember,
-  saveCheckinSettings, lockdown, saveLockdown, setAccountPassword, setAccountDisplayName, setAccountNickname, setAccountUsername, renameMigratedAccount,
-  deviceLogins, clearDeviceLock, setLockoutsOpen, savedLocations, locationsReady, addSavedLocation, updateSavedLocation, removeSavedLocation, reorderLocation, setLocationOrder,
-  setAccountLocation, setGroupInfo,
-  setGroupVenueSchedule, applyVenueSchedule, clearGroupOverrides, setCompanyLocation,
+  lockdown, saveLockdown, setAccountPassword, setAccountDisplayName, setAccountNickname, setAccountUsername, renameMigratedAccount,
+  deviceLogins, clearDeviceLock, setLockoutsOpen,
+  setGroupInfo,
   groupFields, addGroupField, removeGroupField, reorderGroupField, setGroupFieldOrder, renameGroupField,
   accountFields, addAccountField, removeAccountField, reorderAccountField, setAccountFieldOrder, renameAccountField, setAccountFieldEditable, setAccountInfo, setAccountRole,
-  archiveAttendance, adminSubTab, setAdminSubTab,
-  addActivity,
+  adminSubTab, setAdminSubTab,
 }) {
   const [openPopup, setOpenPopup] = useState(null)
   // Tells App when Device Lockouts is on screen, which is the only moment their listener
@@ -9934,8 +7388,6 @@ function AdminView({
   const [newFieldLabel, setNewFieldLabel] = useState('')
   const [platoonInfoTab, setPlatoonInfoTab] = useState('categories')
   const [newAccountFieldLabel, setNewAccountFieldLabel] = useState('')
-  const [statusView, setStatusView] = useState('list') // 'list' | 'edit' | 'color'
-  const [statusDraft, setStatusDraft] = useState(null) // { id, label, color } while editing/adding
   const [confirmId, setConfirmId] = useState(null)
   const [editingId, setEditingId] = useState(null)
   const [editDraft, setEditDraft] = useState({})
@@ -10010,27 +7462,6 @@ function AdminView({
   // The way out of the Vehicle Manifest card's vehicle editor, reported up by that card so
   // the PopupCard header can carry it as a back chevron. Held as a value, so setting it
   // needs the `() => fn` wrapper or React would run it as a state updater.
-  const [freshnessDraft, setFreshnessDraft] = useState(String(checkinSettings.freshnessMinutes ?? DEFAULT_FRESHNESS_MINUTES))
-  const [freshnessMsg, setFreshnessMsg] = useState('')
-  // null = list view; { id, label, coords } = the add/edit form (id null when adding).
-  const [locDraft, setLocDraft] = useState(null)
-  // The company's DEFAULT reporting location — the one that applies on any day no dated ICT
-  // run covers, and the one proximity check-in falls back to outside an ICT altogether.
-  const [companyLocPick, setCompanyLocPick] = useState('')
-  const [locMsg, setLocMsg] = useState('')
-  // The company reporting location is a dated list now, edited the same way a saved location
-  // is: a draft swaps the popup body to a form, null shows the list. { entryId, locationId,
-  // from, to } — entryId null when adding.
-  // ICT SETUP draft: the event date range + company reporting location (denormalized
-  // to every platoon on save). Seeded from the group docs when the card opens.
-  const [archiveYears, setArchiveYears] = useState(null) // null = loading, [] = none
-  const [archiveMsg, setArchiveMsg] = useState('')
-  const [archiveBusy, setArchiveBusy] = useState(false)
-  const [purgeStats, setPurgeStats] = useState(null) // null = not loaded yet
-  const [purgeArmed, setPurgeArmed] = useState(false)
-  const [purgeMsg, setPurgeMsg] = useState('')
-  const [purgeBusy, setPurgeBusy] = useState(false)
-  const purgeTapTimer = useRef(null)
   const [mvStats, setMvStats] = useState(null)   // null = not loaded yet
   const [mvArmed, setMvArmed] = useState(false)
   const [mvMsg, setMvMsg] = useState('')
@@ -10040,7 +7471,6 @@ function AdminView({
   // because a disabled button swallows the tap and answers nothing — and "why won't this
   // work" is exactly the question the held-back line above it already answers. The tap
   // turns that line red instead.
-  const [purgeDenied, setPurgeDenied] = useState(false)
   const [mvDenied, setMvDenied] = useState(false)
   const confirmTimer = useRef(null)
   const adminSectionHeaderStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', margin: '0 0 8px' }
@@ -10077,7 +7507,6 @@ function AdminView({
     return !overrideEnded(from, to, todayISO())
   }
 
-  useEffect(() => { setFreshnessDraft(String(checkinSettings.freshnessMinutes ?? DEFAULT_FRESHNESS_MINUTES)) }, [checkinSettings.freshnessMinutes])
 
   // ms is per button: a Reset that wipes a whole ICT or manifest gets longer to read
   // its own warning than a single row's delete does.
@@ -10192,172 +7621,16 @@ function AdminView({
   }
 
 
-  function saveFreshnessDraft() {
-    const n = parseInt(freshnessDraft, 10)
-    if (Number.isNaN(n) || n < 1 || n > 60) { setFreshnessMsg('Enter a validity time between 1 and 60 minutes.'); return }
-    setFreshnessMsg('')
-    saveCheckinSettings({ ...checkinSettings, freshnessMinutes: n })
-    // Closing is the confirmation — the card has nothing else in it, and staying
-    // open after a save reads as though nothing happened.
-    setOpenPopup(null)
-  }
 
-  // Is there anything to save. Every Save in this app is btn-primary, and a solid blue
-  // button is the app saying "this is the action now" — which is a lie on a form nobody has
-  // touched. Dimmed-and-disabled until the draft differs from what is stored, the way the
-  // Vehicle Manifest's Save has always worked.
-  const freshnessDirty = freshnessDraft !== String(checkinSettings.freshnessMinutes ?? DEFAULT_FRESHNESS_MINUTES)
-  // The editor is one form for two jobs, so its baseline is either the location being
-  // edited or the blank one Add starts from — the same shape setLocDraft builds in each case.
-  const locBase = !locDraft ? null : (locDraft.id
-    ? (() => { const l = savedLocations.find((x) => x.id === locDraft.id) || {}
-        return { label: l.label || '', coords: `${l.lat}, ${l.lng}`, radius: String(l.radiusMeters || DEFAULT_RADIUS) } })()
-    : { label: '', coords: '', radius: String(DEFAULT_RADIUS) })
-  const locDirty = !!locDraft && !!locBase
-    && (locDraft.label !== locBase.label || locDraft.coords !== locBase.coords || locDraft.radius !== locBase.radius)
 
-  // Parse a pasted "latitude, longitude" string into numbers, tolerating
-  // surrounding brackets and whitespace (e.g. Google's "(1.3521, 103.8198)").
-  function parseCoords(str) {
-    const parts = String(str || '').replace(/[()[\]]/g, ' ').split(',')
-    if (parts.length !== 2) return null
-    const lat = parseFloat(parts[0].trim())
-    const lng = parseFloat(parts[1].trim())
-    if (Number.isNaN(lat) || Number.isNaN(lng)) return null
-    return { lat, lng }
-  }
 
-  function useCurrentForLocationDraft() {
-    setLocMsg('') // clear any prior error; no transient "getting location" hint — coords arrive fast
-    getPosition()
-      .then((pos) => { setLocDraft((d) => ({ ...d, coords: `${pos.lat}, ${pos.lng}` })) })
-      .catch((err) => setLocMsg(humanizeGeoError(err)))
-  }
 
-  // Save the venue form for both add (locDraft.id null) and edit (id set).
-  async function saveLocationDraft() {
-    const c = parseCoords(locDraft.coords)
-    const r = parseInt(locDraft.radius, 10)
-    if (Number.isNaN(r) || r < 1 || r > 400) { setLocMsg(LOC_RADIUS_REQUIRED_MSG); return }
-    const radius = r
-    const res = locDraft.id
-      ? await updateSavedLocation(locDraft.id, locDraft.label, c ? c.lat : NaN, c ? c.lng : NaN, radius)
-      : await addSavedLocation(locDraft.label, c ? c.lat : NaN, c ? c.lng : NaN, radius)
-    if (res.ok) { setLocDraft(null); setLocMsg('') }
-    else setLocMsg(res.message)
-  }
 
-  // Both counts come off the SAME read this already did — an activity sheet is a field on
-  // the day document, not a document of its own, so counting them is free. That is also
-  // why there is one row and one button: records and sheets are one document and cannot
-  // be archived apart.
-  //
-  // Sheets are counted by DISTINCT ID across the year, not by summing each document's map.
-  // A company-scoped sheet is duplicated into every platoon's day document under one shared
-  // id, so summing would report a single company parade five times over.
-  async function loadArchiveYears() {
-    try {
-      const snap = await getDocs(collection(db, 'attendance'))
-      const currentYear = new Date().getFullYear()
-      const years = new Map()
-      snap.docs.forEach((d) => {
-        const y = parseInt(d.id.slice(0, 4), 10)
-        if (isNaN(y) || y >= currentYear) return
-        const row = years.get(y) || { year: y, records: 0, sheets: new Set() }
-        row.records += 1
-        Object.keys(d.data().activities || {}).forEach((id) => row.sheets.add(id))
-        years.set(y, row)
-      })
-      setArchiveYears([...years.values()]
-        .map((r) => ({ year: r.year, records: r.records, sheets: r.sheets.size }))
-        .sort((a, b) => b.year - a.year))
-    } catch (e) {
-      setArchiveYears([])
-    }
-  }
 
-  async function doArchive(year) {
-    setArchiveBusy(true)
-    const result = await archiveAttendance(year)
-    setArchiveMsg(result.message)
-    setArchiveBusy(false)
-    if (result.ok) loadArchiveYears()
-  }
 
-  // Supporting documents are the only thing in this app that stores real bulk — a
-  // few thousand certificates would fill the 1 GiB free allowance. Moving off a
-  // flagged status already deletes the file (see retireStatusDoc); this is the
-  // backstop for the ones nobody ever changed. Only the FILES go: the attendance
-  // record keeps saying the person was on MC, which is what history is for.
-  async function loadPurgeStats() {
-    try {
-      const snap = await getDocs(collection(db, 'mcDocs'))
-      const list = snap.docs.map((d) => {
-        const v = d.data()
-        return { id: d.id, to: v.to || v.from, bytes: v.bytes || 0, chunks: v.chunks || 0 }
-      })
-      setPurgeStats({ count: list.length, bytes: list.reduce((n, x) => n + x.bytes, 0), docs: list })
-    } catch (e) {
-      setPurgeStats({ count: 0, bytes: 0, docs: [] })
-    }
-  }
 
-  // Everything whose range has finished. Purging happens once a year or before an
-  // ICT, so there's no use for age thresholds — but a certificate covering today or
-  // a day still to come is someone's live MC, and deleting that would re-raise the
-  // "attach yours" card on them. Those are held back; the count says so when it
-  // matters, and stays quiet when it doesn't.
-  function purgeTargets() {
-    if (!purgeStats) return []
-    return purgeStats.docs.filter((d) => d.to < todayISO())
-  }
 
-  async function runPurge() {
-    const targets = purgeTargets()
-    if (!targets.length || purgeBusy) return
-    setPurgeBusy(true)
-    setPurgeMsg('')
-    try {
-      // A batch caps at 500 writes and one document costs 1 + its parts, so commit in
-      // chunks rather than assuming the whole sweep fits.
-      let batch = writeBatch(db)
-      let writes = 0
-      for (const t of targets) {
-        for (let i = 0; i < t.chunks; i++) { batch.delete(doc(db, 'mcDocs', t.id, 'parts', String(i))); writes++ }
-        batch.delete(doc(db, 'mcDocs', t.id)); writes++
-        if (writes >= 400) { await batch.commit(); batch = writeBatch(db); writes = 0 }
-      }
-      // The watermark. Purging deletes the files and nothing else — the attendance
-      // record still says a certificate is attached, so without this the app keeps
-      // offering one and, finding nothing, has to guess whether it was cleared on
-      // purpose or something broke. One date is enough: everything that ended
-      // before it has had its file deleted. It rides on the settings doc the app
-      // already listens to, so it costs no read, and one write a year to set.
-      batch.set(doc(db, 'settings', 'checkin'), { docsClearedUpTo: todayISO() }, { merge: true })
-      writes++
-      if (writes) await batch.commit()
-      setPurgeMsg(`${targets.length} document${targets.length !== 1 ? 's' : ''} purged.`)
-      loadPurgeStats()
-    } catch (e) {
-      setPurgeMsg("Couldn't purge. Check your connection and try again.")
-    }
-    setPurgeBusy(false)
-  }
 
-  function tapPurge() {
-    if (purgeBusy) return
-    setPurgeMsg('')
-    clearTimeout(purgeTapTimer.current)
-    if (!purgeTargets().length) {
-      setPurgeArmed(false); setPurgeDenied(true)
-      purgeTapTimer.current = setTimeout(() => setPurgeDenied(false), 3000)
-      return
-    }
-    setPurgeDenied(false)
-    if (purgeArmed) { setPurgeArmed(false); runPurge(); return }
-    setPurgeArmed(true)
-    purgeTapTimer.current = setTimeout(() => setPurgeArmed(false), 3000)
-  }
 
   // ---- Finished vehicle manifests ------------------------------------------
   // The manifest document itself is not what this is for. Nothing reads a finished one
@@ -10689,146 +7962,6 @@ function AdminView({
               <PlatoonInfoEntry groups={groups} groupFields={groupFields} setGroupInfo={setGroupInfo} />
             )}
           </PopupCard>
-              {/* Reporting Locations, moved down here out of a section of its own. It had
-                  one - In-Camp-Training Setup - which by the end held only this: Activity
-                  Attendance became Today → Activities → New Activity, Vehicle Manifest became
-                  the truck pill in the day header, and the ICT Period moved to the ICT Setup
-                  card beside the location it frames. A heading over a single row is a heading
-                  that says nothing, so the row joined the list it belongs with: these are all
-                  the LIBRARIES the rest of the app picks from - the info fields a profile
-                  shows, the statuses a man can be marked with, and now the places he can be
-                  told to report to. Last, because it is the one an admin sets once a year and
-                  the two above it are read far more often. */}
-              <div style={{ height: 1, background: 'var(--separator)', margin: '0 16px' }} />
-              <PopupCard
-            grouped
-            title={locDraft ? (locDraft.id ? 'Edit Reporting Location' : 'Add Reporting Location') : 'Reporting Locations'}
-            icon={MapPin}
-            subtitle="Create and edit Reporting Locations."
-            open={openPopup === 'locations'}
-            onOpen={() => { setLocDraft(null); setLocMsg(''); setCompanyLocPick((groups[0] || {}).locationId || ''); setOpenPopup('locations') }}
-            onClose={() => { setLocDraft(null); setLocMsg(''); setOpenPopup(null) }}
-            onBack={locDraft ? () => { setLocDraft(null); setLocMsg('') } : undefined}
-            maxHeight="80vh"
-          >
-            {locDraft ? (
-              <div>
-                {/* Titles in SECONDARY ink, not --text. They were the only field titles in
-                    the app printed at full strength, and next to the value a reader has typed
-                    they competed with it — the label is what the box is called and the answer
-                    is the thing being read. `Company Reporting Location`, four lines further
-                    down this same card, was already grey.
-
-                    Hints sit UNDER their input, not between the title and it. Read top to
-                    bottom a field is now: what it is, the box, then the note about the box —
-                    where before the note came first and pushed the box away from its own
-                    name. Validation is left where it is, tight under the title, because a
-                    refusal has to be read BEFORE the thing it refuses is edited again. */}
-                <p style={{ ...LOC_TITLE, margin: locMsg === LOC_NAME_REQUIRED_MSG ? '0 0 2px' : '0 0 6px' }}>Name</p>
-                {locMsg === LOC_NAME_REQUIRED_MSG && (
-                  <p style={{ fontSize: 12, color: 'var(--red)', margin: '0 0 6px' }}>{locMsg}</p>
-                )}
-                <div style={{ marginBottom: 10 }}>
-                  <IconInput value={locDraft.label} onChange={(e) => { setLocDraft({ ...locDraft, label: e.target.value }); setLocMsg('') }} placeholder="e.g. Main Office" />
-                </div>
-                <p style={{ ...LOC_TITLE, margin: '0 0 2px' }}>Coordinates (Latitude, Longitude)</p>
-                <p style={{ ...LOC_LABEL, margin: (locMsg && locMsg !== LOC_NAME_REQUIRED_MSG && locMsg !== LOC_RADIUS_REQUIRED_MSG) ? '0 0 2px' : '0 0 6px', display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-                  Tap <LocateFixed size={13} style={{ color: 'var(--blue)' }} /> to use your current location.
-                </p>
-                {locMsg && locMsg !== LOC_NAME_REQUIRED_MSG && locMsg !== LOC_RADIUS_REQUIRED_MSG && (
-                  <p style={{ fontSize: 12, color: 'var(--red)', margin: '0 0 6px' }}>{locMsg}</p>
-                )}
-                <div style={{ marginBottom: 10 }}>
-                  <IconInput value={locDraft.coords} onChange={(e) => { setLocDraft({ ...locDraft, coords: e.target.value }); setLocMsg('') }} onLocate={useCurrentForLocationDraft} placeholder="e.g. 1.3521, 103.8198" />
-                </div>
-                <p style={{ ...LOC_TITLE, margin: '0 0 2px' }}>Check-In Radius (metres)</p>
-                <p style={{ ...LOC_LABEL, margin: locMsg === LOC_RADIUS_REQUIRED_MSG ? '0 0 2px' : '0 0 6px' }}>Set distance for Proximity Check-In.</p>
-                {locMsg === LOC_RADIUS_REQUIRED_MSG && <p style={{ fontSize: 12, color: 'var(--red)', margin: '0 0 6px' }}>{locMsg}</p>}
-                <div style={{ marginBottom: 10 }}>
-                  <IconInput inputMode="numeric" value={locDraft.radius} placeholder="1~400"
-                    onChange={(e) => {
-                      const digits = e.target.value.replace(/[^0-9]/g, '')
-                      setLocDraft({ ...locDraft, radius: digits === '' ? '' : String(Math.min(400, parseInt(digits, 10))) })
-                      setLocMsg('')
-                    }} />
-                </div>
-                <button className="btn-primary" style={{ width: '100%', opacity: locDirty ? 1 : 0.4 }}
-                  disabled={!locDirty} onClick={saveLocationDraft}>Save</button>
-              </div>
-            ) : (
-            <>
-            {/* The DEFAULT first, then the library it picks from — the setting on top, the
-                material under it. It is one saved place, it applies on every day no dated ICT
-                run covers, and it is what keeps proximity check-in working outside an ICT at
-                all, so it is the answer this card exists to give.
-
-                Reset travels with it: it clears every reporting-location assignment in the
-                company, which is this setting plus the platoon, section and personnel ones —
-                and a wipe button parked on a card that shows none of them is a trap. Gated on
-                there being something to clear, so it is absent on a clean setup. */}
-            {(() => {
-              const pickDirty = companyLocPick !== ((groups[0] || {}).locationId || '')
-              return (
-                <>
-                  <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 8px' }}>Default Reporting Location</p>
-                  {/* NONE is a real option here, and the app's placeholder convention does not
-                      apply: everywhere else an empty select means a question the admin has not
-                      answered yet, so it shows an unselectable prompt. Here it means "the
-                      company has no default", which is a settable state with a consequence —
-                      no default is what turns proximity check-in off outside an override.
-                      A state you can choose deserves a line you can pick, and it replaces the
-                      red Clear All chip that used to sit in this row: a dropdown that can say
-                      None needs no button beside it to unsay the answer.
-
-                      Secondary ink while it reads None, so an unset default stays quiet
-                      against the saved places under it rather than looking like a choice. */}
-                  <select className="select-arrow" value={companyLocPick}
-                    onChange={(e) => setCompanyLocPick(e.target.value)}
-                    style={{ width: '100%', color: companyLocPick ? 'var(--text)' : 'var(--text-secondary)' }}>
-                    <option value="">None</option>
-                    {savedLocations.map((l) => <option key={l.id} value={l.id} style={{ color: 'var(--text)' }}>{l.label}</option>)}
-                  </select>
-                  <button className="btn-primary" style={{ width: '100%', marginTop: 12, opacity: pickDirty ? 1 : 0.4 }}
-                    disabled={!pickDirty} onClick={() => setCompanyLocation(companyLocPick)}>Save</button>
-                </>
-              )
-            })()}
-            <div style={{ height: 1, background: 'var(--separator)', margin: '16px 0' }} />
-            {/* The saved PLACES — the library both the setting above and the ICT card on the
-                Today tab pick from: a name, a coordinate and a radius. */}
-            <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 8px' }}>Saved Reporting Locations</p>
-            {savedLocations.length === 0 ? (
-              <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: '0 0 12px' }}>No reporting locations saved yet.</p>
-            ) : (
-              <>
-              <ReorderList items={savedLocations} onReorder={setLocationOrder} ghostLabel={(loc) => loc.label}
-                rowPadding="10px 8px" itemGap={4} handlePadding={0}
-                renderRow={(loc, dragHandle) => {
-                  return (
-                    <>
-                      {dragHandle && <button aria-label="Drag to reorder" {...dragHandle}><GripVertical size={16} /></button>}
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <p style={{ fontWeight: 500, margin: 0, transform: 'translateY(-1px)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{loc.label}</p>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, marginLeft: 8 }}>
-                        <button onClick={() => { setConfirmId(null); setLocMsg(''); setLocDraft({ id: loc.id, label: loc.label, coords: `${loc.lat}, ${loc.lng}`, radius: String(loc.radiusMeters || DEFAULT_RADIUS) }) }} aria-label="Edit location" style={{ background: 'none', border: 'none', padding: 4, color: 'var(--text-secondary)' }}>
-                          <Pencil size={15} />
-                        </button>
-                        <button onClick={() => requestConfirm(`loc:${loc.id}`, () => removeSavedLocation(loc.id))} aria-label="Delete location" style={{ background: 'none', border: 'none', padding: 4, color: confirmId === `loc:${loc.id}` ? 'var(--red)' : 'var(--text-secondary)', fontSize: 11, fontWeight: 600 }}>
-                          {confirmId === `loc:${loc.id}` ? 'Confirm' : <Trash2 size={16} />}
-                        </button>
-                      </div>
-                    </>
-                  )
-                }} />
-              </>
-            )}
-            <button className="btn-primary" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 12 }} onClick={() => { setConfirmId(null); setLocMsg(''); setLocDraft({ id: null, label: '', coords: '', radius: String(DEFAULT_RADIUS) }) }}>
-              <Plus size={16} /> Add Reporting Location
-            </button>
-            </>
-            )}
-          </PopupCard>
             </div>
           </div>
 
@@ -10883,28 +8016,6 @@ function AdminView({
               </div>
             )}
           </PopupCard>
-              <div style={{ height: 1, background: 'var(--separator)', margin: '0 16px' }} />
-              <PopupCard grouped title="Proximity Refresh Rate" icon={SlidersHorizontal} subtitle="Set validity time for Proximity Check-In."
-                open={openPopup === 'checkin'}
-                /* Reseeded on open, like the ICT Period and Reporting Locations cards above.
-                   The draft is component state and outlives a close, so an abandoned edit —
-                   the box emptied and the card shut without saving — came back on the next
-                   open looking as though the stored value had gone. Closing without saving
-                   must leave nothing behind; the effect above only re-syncs when the SAVED
-                   value changes, which is exactly the case where nothing was saved. */
-                onOpen={() => { setFreshnessDraft(String(checkinSettings.freshnessMinutes ?? DEFAULT_FRESHNESS_MINUTES)); setFreshnessMsg(''); setOpenPopup('checkin') }}
-                onClose={() => { setFreshnessMsg(''); setOpenPopup(null) }}>
-            <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 6px' }}>Validity Time (minutes)</p>
-            {freshnessMsg && <p style={{ fontSize: 12, color: 'var(--red)', margin: '0 0 6px' }}>{freshnessMsg}</p>}
-            <IconInput inputMode="numeric" value={freshnessDraft} placeholder="1~60"
-              onChange={(e) => {
-                const digits = e.target.value.replace(/[^0-9]/g, '')
-                setFreshnessDraft(digits === '' ? '' : String(Math.min(60, parseInt(digits, 10))))
-                setFreshnessMsg('')
-              }} />
-            <button className="btn-primary" style={{ width: '100%', marginTop: 12, opacity: freshnessDirty ? 1 : 0.4 }}
-              disabled={!freshnessDirty} onClick={saveFreshnessDraft}>Save</button>
-          </PopupCard>
           {account.isSuperAdmin && (
               <>
               <div style={{ height: 1, background: 'var(--separator)', margin: '0 16px' }} />
@@ -10914,45 +8025,13 @@ function AdminView({
                   sits above: it is a live switch rather than a clean-up, and a mode
                   change that takes one tap does not belong in the same box as two
                   irreversible deletions. */}
-              <PopupCard grouped title="Purge and Archive" icon={Archive} subtitle="Purge/Archive documents, records, etc." maxHeight="70vh"
+              <PopupCard grouped title="Clear Manifests" icon={Archive} subtitle="Clear out past vehicle manifests." maxHeight="70vh"
                 open={openPopup === 'purgeArchive'}
                 onOpen={() => {
                   setOpenPopup('purgeArchive')
-                  setPurgeMsg(''); setPurgeArmed(false); setPurgeStats(null); loadPurgeStats()
                   setMvMsg(''); setMvArmed(false); setMvStats(null); loadMvStats()
-                  setArchiveMsg(''); setConfirmId(null); setArchiveYears(null); loadArchiveYears()
                 }}
                 onClose={() => setOpenPopup(null)}>
-                <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', margin: '0 0 6px' }}>Supporting Documents</p>
-                <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 10px' }}>
-                  Only the files are deleted. Attendance records are kept.
-                </p>
-                {purgeStats === null ? (
-                  <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0 }}>Loading…</p>
-                ) : purgeStats.count === 0 ? (
-                  <p style={{ fontSize: 13, margin: 0 }}>No documents stored.</p>
-                ) : (
-                  (() => {
-                    const n = purgeTargets().length
-                    const held = purgeStats.count - n
-                    return (
-                      <>
-                        <p style={{ fontSize: 13, margin: '0 0 4px' }}>{purgeStats.count} document{purgeStats.count !== 1 ? 's' : ''} · {fmtBytes(purgeStats.bytes)} stored.</p>
-                        {/* Red on either tap that isn't the ordinary one: armed, because the
-                            next press deletes and this says what survives it; denied, because
-                            this line IS the reason the press did nothing. Same rule below. */}
-                        {held > 0 && <p style={{ fontSize: 12, color: (purgeArmed || purgeDenied) ? 'var(--red)' : 'var(--text-secondary)', margin: '0 0 10px' }}>{held} document{held !== 1 ? 's' : ''} still valid and will be kept.</p>}
-                        <button className="btn-primary" disabled={purgeBusy}
-                          onClick={tapPurge}
-                          style={{ width: '100%', marginTop: held > 0 ? 0 : 8, background: purgeArmed ? 'var(--red)' : undefined, opacity: n === 0 ? 0.4 : 1 }}>
-                          {purgeBusy ? 'Purging…' : purgeArmed ? 'Tap Again to Purge Documents' : 'Purge Documents'}
-                        </button>
-                      </>
-                    )
-                  })()
-                )}
-                {purgeMsg && <p style={{ fontSize: 12, marginTop: 8, color: purgeMsg.startsWith("Couldn't") ? 'var(--red)' : 'var(--blue)' }}>{purgeMsg}</p>}
-              <div style={{ height: 1, background: 'var(--separator)', margin: '16px 0' }} />
               <div>
                 <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', margin: '0 0 6px' }}>Vehicle Manifests</p>
                 <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 10px' }}>
@@ -10980,57 +8059,6 @@ function AdminView({
                   })()
                 )}
                 {mvMsg && <p style={{ fontSize: 12, marginTop: 8, color: mvMsg.startsWith("Couldn't") ? 'var(--red)' : 'var(--blue)' }}>{mvMsg}</p>}
-              </div>
-              <div style={{ height: 1, background: 'var(--separator)', margin: '16px 0' }} />
-              <div>
-                <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', margin: '0 0 6px' }}>Attendance Records</p>
-                <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 10px' }}>
-                  Roll calls and activity attendance are archived together.
-                </p>
-                {archiveYears === null ? (
-                  <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0 }}>Loading…</p>
-                ) : archiveYears.length === 0 ? (
-                  <p style={{ fontSize: 13, margin: 0 }}>No records to archive.</p>
-                ) : (
-                  <div style={{ borderRadius: 14, overflow: 'hidden' }}>
-                    {/* Arm-and-confirm on a tinted pill, the same shape as every other
-                        row action in the app — the Section and override bins, Device
-                        Lockouts' Re-enable. It used to want three taps and said so in
-                        permanent grey text, which is a pattern nothing else here uses
-                        and which put the warning on the row before you had asked for
-                        anything. Red only once the next tap is the one that acts. */}
-                    {archiveYears.map((y) => {
-                      const armed = confirmId === `archive:${y.year}`
-                      return (
-                        <div key={y.year} className="list-row">
-                          {/* The year, and under it what that year actually holds. Stacked
-                              rather than run along the row: the row is space-between with a
-                              chip on the right, so a long count line squeezed the chip and
-                              the four rows stopped lining up with each other.
-                              Both counts always, a zero included — "0 activity sheets" says
-                              that year had none, where leaving the clause out would leave a
-                              super admin wondering whether they were counted at all. */}
-                          <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-                            <span style={{ fontWeight: 500 }}>{y.year}</span>
-                            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                              {y.records} record{y.records !== 1 ? 's' : ''} · {y.sheets} activity sheet{y.sheets !== 1 ? 's' : ''}
-                            </span>
-                          </span>
-                          <button
-                            disabled={archiveBusy}
-                            onClick={() => { setArchiveMsg(''); requestConfirm(`archive:${y.year}`, () => doArchive(y.year)) }}
-                            // Solid fill, white ink — the only CHIP_STYLE that isn't a
-                            // tint, so it keeps no edge: 45% of white would ring it.
-                            style={{ ...CHIP_STYLE, border: 'none', cursor: 'pointer', background: armed ? 'var(--red)' : 'var(--blue)', color: '#fff' }}
-                          >
-                            {archiveBusy ? 'Archiving…' : armed ? 'Confirm' : 'Archive'}
-                          </button>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-                {archiveMsg && <p style={{ fontSize: 12, marginTop: 8, color: archiveMsg.startsWith('Archived') ? 'var(--blue)' : 'var(--red)' }}>{archiveMsg}</p>}
               </div>
             </PopupCard>
               </>
@@ -11080,16 +8108,6 @@ function AdminView({
                   ) : (
                   <div style={{ borderRadius: 14, overflow: 'hidden' }}>
                     {sec.members.map((a, i) => {
-                      // Flag only a personal override that actually differs from
-                      // where their Section/platoon would send them today —
-                      // otherwise there is nothing to spot in the list.
-                      // Through the SAME rule the Reporting Location card above counts by,
-                      // so the two cannot disagree — the row used to print an override the
-                      // tile had already written off, which is how an expired one showed
-                      // under a name while the count above it said none.
-                      const theirs = (a.locationId && overrideInScope(a.locationFrom, a.locationTo)) ? savedLocations.find((l) => l.id === a.locationId) || null : null
-                      const groupVenue = effectiveVenue({ miniGroupId: a.miniGroupId }, activeGroupObj, savedLocations, todayISO())
-                      const oddOneOut = !!theirs && theirs.id !== groupVenue.id
                       return (
                       <div key={a.id} className="list-row">
                         <div style={{ minWidth: 0 }}>
@@ -11097,12 +8115,6 @@ function AdminView({
                             <span style={{ fontWeight: 500 }}>{memberLabel(a)}</span>
                             {a.isSuperAdmin ? <ShieldCheck size={13} color="var(--orange)" style={{ flexShrink: 0 }} /> : a.isAdmin ? <Shield size={13} color="var(--blue)" style={{ flexShrink: 0 }} /> : null}
                           </div>
-                          {oddOneOut && (
-                            <p style={{ fontSize: 11, fontWeight: 600, margin: 0, display: 'flex', alignItems: 'center', gap: 2, color: venueColor(a.locationId, activeGroupObj, a.locationFrom || undefined), minWidth: 0 }}>
-                              <MapPin size={10} style={{ flexShrink: 0 }} />
-                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{theirs.label}{a.locationFrom ? <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}> | {outlookDates({ from: a.locationFrom, to: a.locationTo || a.locationFrom })}</span> : ''}</span>
-                            </p>
-                          )}
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                           <button onClick={() => reorderMember(a.id, -1)} disabled={i === 0} aria-label="Move up" style={{ background: 'none', border: 'none', padding: 4, display: 'flex', color: i === 0 ? 'var(--separator)' : 'var(--text-secondary)' }}>

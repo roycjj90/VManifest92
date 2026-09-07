@@ -58,16 +58,29 @@ sections, styling and iOS keyboard handling already work — that all carries ov
 `storageBucket` is cosmetic here — the app never imports Firebase Storage — but
 copy whatever the console shows rather than guessing the suffix.
 
-## Phase 1 — Copy and strip  🔶 IN PROGRESS
+## Phase 1 — Copy and strip  ✅ SUBSTANTIALLY DONE
 
-**Done so far:** tree copied · 4 npm deps dropped · rebrand pass applied · Manifests /
-Platoon / Personnel / Admin tab bar in place with Manifests as home · Today, Count,
-Activity, MC certs, QR + proximity check-in, venue scheduling and the Status Label
-library deleted. `src/App.jsx` 17,054 → 11,354 lines. `npm run build` green.
+`src/App.jsx` **17,054 → 8,378 lines**. Build green, no undefined variables
+(checked with an ESLint `no-undef` pass over `src/`), login screen renders with
+zero console errors.
 
-**Still to do:** the attendance state layer inside `App()` — listeners, handlers and
-`useState` for `attendance`, `statuses`, `mcDocs`, `locations`, freeze/morning-record —
-plus the matching sections of `AdminView`, and `src/lib.js`'s venue/upload helpers.
+Removed: 4 npm deps · Today, Count, Activity, MC certificate upload/viewer, QR and
+proximity check-in, venue scheduling, the Status Label library, Reporting Locations,
+Proximity Refresh Rate, attendance archive and certificate purge · 81 attendance /
+activity / venue functions inside `App()` · **every attendance listener and on-demand
+attendance read** · the dead state they fed.
+
+Tab bar: Manifests (home, always present) · Platoon · Personnel · Admin.
+
+**Known gap, carried into Phase 2c:** `mySeats` is no longer populated — it used to
+come off the `attendanceSelf` listener, which is gone. A rider's seat view will be
+empty until `seats/{accountId}` is built. This is the planned replacement, not a
+regression to undo.
+
+**Left over for a tidy-up pass:** the venue helpers still at the top of `App.jsx`
+(`effectiveVenue`, `companyVenue`, `venueRuns`, `coverageGaps`), their remaining uses
+in `AccountView` / `GroupMembersView`, the `statuses` state (needed until Phase 2a),
+and `src/lib.js`'s venue and upload helpers.
 
 Copy the PULSE 92 tree (skip `node_modules`, `dist`, `.git`, `.env`).
 
@@ -135,9 +148,27 @@ Shape goes `person → platoon → section` **⇒** `person → COMPANY → plat
   second read.
 - Sections unchanged (`miniGroups` inside the platoon doc).
 
-**4 permission levels:** battalion admin (all 5 coys) / company admin (own coy) /
-platoon admin (own platoon) / member (own seat). The code has 2 today
-(`isSuperAdmin`, `isAdmin`) — this adds a third in the middle.
+**2 permission levels** (revised down from 4, Roy's call): **admin** — sees and seats
+the whole battalion — and **member**, who sees their own seat.
+
+Both the platoon-admin and company-admin levels are dropped. Platoon admin existed in
+PULSE 92 because roll call is taken per platoon; with attendance gone there is no
+per-platoon job left. Company admin was then dropped too, in favour of the simplest
+thing that works.
+
+*The trade-off, recorded so it is a decision and not an oversight:* there is no longer
+any scoping between companies — any admin can see and seat any company's men, and
+nothing in the app prevents it. Raised before building; Roy's call to proceed.
+
+Mechanically `isSuperAdmin` and `isAdmin` both stay in the code. The pair is
+load-bearing throughout `App.jsx` and string-matched by `firestore.rules`; collapsing
+them into one flag is a rename with no behavioural gain and a real chance of breaking
+logins. An admin is simply always both.
+
+Platoon and Section remain unchanged as organisational structure — this removes
+permission levels, not levels of the hierarchy. Re-introducing company scoping later
+is a filter on one flag plus a rules clause; the seat already carries the rider's
+platoon id and name, and Phase 3 adds company the same way.
 
 **Screens:** company picker on the Personnel and Platoon tabs. The "add people to
 this vehicle" sheet becomes Company → Platoon → Section drill-down **plus a
@@ -204,9 +235,10 @@ because it is one company. 5 companies need many.
    - `seats/{accountId}` — a person reads their **own** doc only; writes admin-only.
    - `movements/{id}` — admin read only; riders never reach it.
    - `rosters/{companyId}` — admin read; battalion sees all, company sees its own.
-2. `ensureSeedData()` (`App.jsx:964`) already creates `admin`/`123` + a default
-   platoon on an empty DB. Change it to also create the 5 companies, and to stop
-   creating statuses.
+2. `ensureSeedData()` no longer creates statuses, and seeds **two test accounts** —
+   `admin` (full access) and `user` (member), both password `123` — one per permission
+   level, so the two dev quick-login buttons work on a fresh database. Phase 6 adds the
+   5 companies here and removes the test accounts along with the buttons.
 3. Bulk import the 500 — reuse the approach in `~/.claude/plans/bulk-account-import.md`.
    Do not type 500 people by hand.
 4. **App Check last:** register reCAPTCHA v3, set `VITE_RECAPTCHA_SITE_KEY`,
