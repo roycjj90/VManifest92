@@ -1,0 +1,43 @@
+name: Cleanup orphan auth users
+
+# Deletes Firebase Auth users left orphaned by synthetic-email rotation.
+# Runs monthly, and can be triggered manually (with an optional dry run).
+#
+# Setup (one-time):
+#   1. Firebase Console -> Project settings -> Service accounts -> Generate new
+#      private key. Download the JSON.
+#   2. GitHub repo -> Settings -> Secrets and variables -> Actions -> New
+#      repository secret named FIREBASE_SERVICE_ACCOUNT; paste the whole JSON.
+# The service-account key grants broad project access — keep it secret and rotate
+# it if it is ever exposed.
+
+on:
+  schedule:
+    - cron: '17 3 1 * *' # 03:17 UTC on the 1st of each month
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (log only, delete nothing)'
+        type: boolean
+        default: false
+      grace_hours:
+        description: 'Skip auth users created within N hours (default 24)'
+        type: string
+        default: '24'
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install firebase-admin
+        run: npm install firebase-admin@^12 --no-save
+      - name: Run cleanup
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          DRY_RUN: ${{ inputs.dry_run == true && 'true' || 'false' }}
+          GRACE_HOURS: ${{ inputs.grace_hours || '24' }}
+        run: node scripts/cleanup-orphan-auth-users.cjs

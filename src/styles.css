@@ -1,0 +1,733 @@
+:root {
+  --bg: #F2F2F7;
+  --card: #FFFFFF;
+  --text: #1C1C1E;
+  --text-secondary: #8E8E93;
+  --separator: #E5E5EA;
+  --card-border: transparent;
+  /* Edge for an uploaded document preview. A scanned certificate is mostly white
+     paper, so on a white card it bleeds into the sheet with nothing to bound it.
+     Transparent in dark, where the card is already darker than the scan. */
+  --doc-outline: #D1D1D6;
+  --blue: #007AFF;
+  --blue-tint: rgba(0, 122, 255, 0.1);
+  /* The four Reset chips' fill. Blue's tint is bumped on a .card further down because a
+     grey card drains it; red needs the opposite scope — every Reset sits in a SECTION
+     HEADER, on the page background, not on a card, so a card-scoped rule would never have
+     reached one. On black, 15% red is not desaturated, it is simply too dim to read as a
+     control; dark mode takes it to 22%. Light mode is unchanged: on white, 15% red is
+     already 98% saturated and looks the way it should.
+     Short of blue's 28% on purpose — this pill flips to a SOLID red `Confirm` once armed,
+     and the two states have to stay tellable apart. */
+  --red-tint: rgba(255, 59, 48, 0.15);
+  --green: #34C759;
+  --red: #FF3B30;
+  --orange: #FF9500;
+  /* Categorical only — the one hue with no state meaning attached, used for
+     labels that classify rather than warn (e.g. an attached man's section). */
+  --purple: #AF52DE;
+  /* The Vehicle Commander's pill. Graphite in BOTH themes, because the senior seat should look
+     the same wherever it is read. On a dark card that is black on #2C2C2E, near enough the
+     same value that the pill reads as its white label rather than as a shape - which is the
+     quiet the role was given on purpose. */
+  --role-vc-bg: #1C1C1E;
+  --role-vc-ink: #FFFFFF;
+  /* The Driver's pill, pinned to the LIGHT purple in both themes. Declared here and nowhere
+     else on purpose: no dark override means it does not shift, which is the whole point. */
+  --role-driver-bg: #AF52DE;
+  --nav-bg: rgba(242, 242, 247, 0.85);
+  --tab-bg: rgba(255, 255, 255, 0.92);
+  --tab-border: rgba(0, 0, 0, 0.12);
+  --tab-shadow: 0 2px 6px rgba(0, 0, 0, 0.1), 0 10px 24px rgba(0, 0, 0, 0.1);
+  /* How much of a status colour survives when it's used as ink on a 25% tint of
+     itself. On a white card the raw hue washes out (green reads 1.81:1), so pull
+     it toward --text; on a dark card it already stands out, so keep it pure. */
+  --tint-ink-mix: 55%;
+  /* Ink for text sitting on a 25% tint of its own status colour, where that text has
+     to clear the full 4.5:1 (the Current Status banner at 17px, the Other Status
+     pills at 14px). Pulled further than --tint-ink-mix in light because a PALE status
+     is the hard case there — MC read 3.01:1 at 55%, and 4.67:1 at 40%.
+     Dark is NOT 100%: on a dark card the hard case flips to the DARK statuses, and
+     leaving them at full hue put RSI (blue) at 2.51:1. Blending toward white lifts
+     them clear while costing the bright ones nothing. One number per theme covers
+     every hue; the two themes need different numbers because they fail at opposite
+     ends of the luminance range. */
+  --tint-ink-strong: 40%;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #000000;
+    --card: #2C2C2E;
+    --text: #FFFFFF;
+    --text-secondary: #98989D;
+    --separator: #48484A;
+    --card-border: var(--separator);
+    --doc-outline: transparent;
+    --blue: #0A84FF;
+    --blue-tint: rgba(10, 132, 255, 0.18);
+    --red-tint: rgba(255, 69, 58, 0.22);
+    --green: #30D158;
+    --red: #FF453A;
+    --orange: #FF9F0A;
+    --purple: #BF5AF2;
+    --role-vc-bg: #000000;
+    --role-vc-ink: #FFFFFF;
+    --nav-bg: rgba(0, 0, 0, 0.85);
+    --tab-bg: rgba(58, 58, 60, 0.85);
+    --tab-border: rgba(255, 255, 255, 0.16);
+    --tab-shadow: 0 3px 8px rgba(0, 0, 0, 0.6), 0 22px 60px rgba(0, 0, 0, 0.48);
+    --tint-ink-mix: 100%;
+    --tint-ink-strong: 55%;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #000000;
+  --card: #2C2C2E;
+  --text: #FFFFFF;
+  --text-secondary: #98989D;
+  --separator: #48484A;
+  --card-border: var(--separator);
+  --doc-outline: transparent;
+  --blue: #0A84FF;
+  --blue-tint: rgba(10, 132, 255, 0.18);
+  --red-tint: rgba(255, 69, 58, 0.22);
+  --green: #30D158;
+  --red: #FF453A;
+  --orange: #FF9F0A;
+  --purple: #BF5AF2;
+  --role-vc-bg: #000000;
+  --role-vc-ink: #FFFFFF;
+  --nav-bg: rgba(0, 0, 0, 0.85);
+  --tab-bg: rgba(58, 58, 60, 0.85);
+  --tab-border: rgba(255, 255, 255, 0.16);
+  --tab-shadow: 0 3px 8px rgba(0, 0, 0, 0.6), 0 22px 60px rgba(0, 0, 0, 0.48);
+  --tint-ink-mix: 100%;
+  --tint-ink-strong: 55%;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+/* Double-tap-to-zoom off, and with it the ~300ms Safari holds every tap for while
+   it waits to see whether a second one is coming. Unlike the viewport lock in
+   index.html this also works in an ordinary Safari tab. On every element rather
+   than the page: touch-action does not inherit, so anything left at `auto` — the
+   scroller that holds the whole app, for one — would hand double-tap zoom straight
+   back over its own area. `manipulation` keeps panning and scrolling, so the pull
+   to refresh is untouched, and the drag handles that set `none` for themselves win
+   over this on specificity. */
+* { touch-action: manipulation; }
+/* iOS Safari paints a translucent black box over whatever you tap, sized to the
+   element rather than to its rounded shape — so a pill button flashes a grey
+   RECTANGLE around itself. It is WebKit's stand-in for a pressed state, and this app
+   already has its own (.btn-primary/.btn-secondary scale down on :active). Turned off
+   everywhere, since the buttons that carry no :active style are icon and text buttons
+   whose whole job is to be unobtrusive. */
+* { -webkit-tap-highlight-color: transparent; }
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  /* Kill the native page rubber-band. On tabs whose content fits the screen, a downward
+     drag would otherwise bounce the whole viewport with the finger, so clientY barely
+     moves and the custom pull-to-refresh under-registers (no icon, inconsistent vs tall
+     tabs). With the bounce gone, the finger tracks and the pull behaves the same on
+     every tab. */
+  overscroll-behavior: none;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  /* iOS Safari's automatic text inflation, off. Left at its default of `auto`, WebKit
+     is free to scale text up on its own when it decides a block is too narrow to read
+     comfortably — which happens on a real phone with the system text size raised, and
+     never in a desktop preview at the same 402px. Every size in this app is already
+     chosen for a phone, so there is nothing for it to correct; all it did was push
+     rows that fit onto a second line. `100%` means "render the size I asked for". */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.screen {
+  /* Pinned to the visual viewport (not just sized to it): position:fixed + a
+     translateY of visualViewport.offsetTop keeps the whole shell glued to the
+     visible area when the keyboard is up, instead of riding iOS's focus-scroll of
+     the layout viewport — which otherwise leaves a gap under a focused inline field.
+     --vv-height/--vv-top come from main.jsx; --app-height/100dvh are fallbacks. */
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100dvh;
+  height: var(--vv-height, var(--app-height, 100dvh));
+  transform: translateY(var(--vv-top, 0px));
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-bar {
+  flex-shrink: 0;
+  backdrop-filter: blur(20px);
+  background: var(--nav-bg);
+  border-bottom: 1px solid var(--separator);
+  padding: 14px 16px 10px;
+}
+/* The name line's gap to whatever comes after it in the bar - the platoon selector,
+   a banner, the admin tools. When it is the LAST thing in the bar the gap is the nav
+   bar's own 10px of bottom padding and nothing else, which is exactly what sits under
+   the selector on every tab that has one. Left at the full gap it made the three tabs a
+   platoon
+   admin gets no selector on - Count, Platoon, Settings - carry a header 7px deeper than
+   the rest of the app. :last-child rather than a prop, because what follows the name is
+   decided by half a dozen unrelated conditions and the browser already knows the answer. */
+/* 6px, not the 7 it carried. Roy's call. The title above leaves 7px of its own leading
+   under "VManifest 92", so a 7px margin here put the name line dead centre between the two -
+   which read as floating rather than as belonging to the card it captions. A pixel closer
+   to the card ties it down. */
+.nav-subtitle { margin: 0 0 6px; }
+.nav-subtitle:last-child { margin-bottom: 0; }
+
+.large-title {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
+  margin: 0;
+}
+
+.segmented {
+  position: relative; /* the sliding pill positions against this track */
+  display: flex;
+  gap: 2px;
+  background: var(--tab-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 0.5px solid var(--tab-border);
+  border-color: color-mix(in srgb, var(--tab-border) 55%, transparent);
+  border-radius: 999px;
+  padding: 2px;
+  overflow-x: auto;
+}
+/* Scrollable selectors: the scroll (and its scrollbar) live on this wrapper, in the
+   padding-bottom space below the rounded .segmented track — so the bar doesn't paint
+   over the pill. The inner track sizes to its buttons and fills the width when short. */
+/* One segment is a label, not a choice. The grey track around a single blue pill read as an
+   empty frame with something rattling in it, so the background and the border go.
+
+   And once they have gone there is no track — so the padding and border that inset a pill
+   from a frame are insetting it from nothing, and every gap measured to this control was
+   3px short of where the eye put it. It used to keep them, on the argument that the pill
+   should be the same HEIGHT as a segment sitting beside a second one; it still is, because
+   the button's own padding is what sets that. All that goes is the invisible box around it,
+   which is why the sides went first and the top and bottom have now followed.
+
+   `.seg-pill` is absolutely positioned and hard-codes the 2px inset it is cancelling, so it
+   has to be told as well or it draws 4px shorter than the button it sits behind. */
+.segmented--solo {
+  background: none;
+  border-color: transparent;
+  border-width: 0;
+  padding: 0;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.segmented--solo .seg-pill { top: 0; bottom: 0; }
+/* ...and the pill grows to fill the space the frame gave back, 29px to 35. What is on screen
+   in this state is a blue pill and nothing else, and what is on screen on every other tab is
+   a 35px grey track — so 35 is the height this has to be for the two to read as the same
+   control in two states. The 3px comes back as the button's own padding, which is also what
+   keeps the label centred in it.
+
+   It settles the Movement tab's jump for free: its lone pill is now exactly as tall as the
+   two-segment track it becomes, so gaining a second manifest kind moves nothing.
+
+   Two classes on the selector, not one: `.segmented button` sets `padding` as a shorthand and
+   is declared further down this file, so at equal specificity it would win and a
+   single-class rule here would do nothing at all. */
+/* A LABEL can be read bigger than a segment can. A segment is one of several and its size is
+   set by the track it shares; this one is the only thing in its track and is naming the screen
+   you are on, so it takes 15px where a segment takes 13. The padding pays for it exactly —
+   7.5px against 9 — so the pill stays 35px and nothing above or below it moves. The half
+   pixel is real: a 15px line box is 20px against a 13px one's 17, and 7 each side came out
+   at 34. */
+.segmented.segmented--solo button { padding-top: 7.5px; padding-bottom: 7.5px; font-size: 15px; }
+
+.segmented-scroll {
+  overflow-x: auto;
+  /* Reserve room for the scrollbar below the track, but cancel it from the layout
+     height so the nav-bar separator stays level with the other tabs. The scrollbar
+     tucks into the nav-bar's existing 10px bottom padding. */
+  padding-bottom: 8px;
+  margin-bottom: -8px;
+}
+.segmented-scroll > .segmented {
+  width: max-content;
+  min-width: 100%;
+}
+/* The same sliding pill as the tab bar, for every segmented track in the app.
+   These segments size to their labels ("General" is not "Unassigned"), so the
+   geometry can't be written in CSS the way the equal-width tab bar's could —
+   App.jsx measures the active button and writes width + translateX here. Width
+   animates too, which is what makes a jump between two differently-sized labels
+   read as one pill stretching across rather than a new pill appearing. */
+.seg-pill {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 0;
+  border-radius: 999px;
+  background: var(--blue);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+.segmented button {
+  /* Share the slack, don't leave it at the end. `flex: none` sized every segment to its
+     label, so a track short enough to fit — four platoons instead of five — drew
+     "Platoon 2" at 84px beside "ATTACH" at 76 and left the remainder as a gap after the
+     last one. Basis 0 with grow 1 splits the track evenly instead.
+     `min-width: max-content` is what keeps the overflow case working: nothing can be
+     squeezed below its own label, so once the labels no longer fit the segments fall back
+     to their natural widths, the track overruns, and the wrapper scrolls exactly as before.
+     Equal when there is room, scrollable when there is not — no variant class needed. */
+  flex: 1 1 0;
+  min-width: max-content;
+  position: relative; /* above the sliding pill */
+  z-index: 1;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  white-space: nowrap;
+  transition: color 0.2s ease;
+}
+.segmented button.active { color: #fff; }
+/* Equal-width variant: segments split the track evenly (e.g. a 2-tab toggle) instead
+   of sizing to their labels. */
+/* Opt back OUT of the even split, for a track that is not only segments. The Personnel
+   tab's theme row ends with a "Theme" caption held right by margin-left:auto, and segments
+   that grow eat the very gap that caption needs to read as separate from them. */
+.segmented--auto button {
+  flex: none;
+  min-width: 0;
+}
+
+/* Kept as it was: this variant is allowed to squeeze a label, which the rule above is not. */
+.segmented--fill button {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --segment-active: #71717A;
+    --segment-active-shadow: rgba(0, 0, 0, 0.5);
+    --segment-track: rgba(118, 118, 128, 0.36);
+  }
+}
+:root[data-theme="dark"] {
+  --segment-active: #71717A;
+  --segment-active-shadow: rgba(0, 0, 0, 0.5);
+  --segment-track: rgba(118, 118, 128, 0.36);
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 14px;
+  padding: 14px 16px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.card > :first-child, .accordion-body > :first-child { margin-top: 0; }
+.card > :last-child, .accordion-body > :last-child { margin-bottom: 0; }
+
+.accordion-body .list-row { border-left: 0; border-right: 0; }
+.accordion-body .list-row:first-child { border-top: 0; border-radius: 0; }
+.accordion-body .list-row:last-child { border-bottom: 0; border-radius: 0; }
+
+.list-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--card);
+  border-left: 1px solid var(--card-border);
+  border-right: 1px solid var(--card-border);
+  /* Stated, not omitted: a button with no border-bottom declared falls back to the
+     browser's own 2px outset one, the same reason button.list-row zeroes border-top. */
+  border-bottom: 0;
+}
+/* The separator is inset to the row's own padding on both sides, so it starts under
+   the first character and stops under the last. A pseudo-element rather than
+   border-bottom, because a border always spans the whole element and there is no way
+   to inset one. (iOS runs its own separators flush to the trailing edge; this is a
+   deliberate departure — symmetric reads cleaner here.) */
+.list-row::after {
+  content: '';
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 0;
+  height: 1px;
+  background: var(--separator);
+}
+/* The bottom of the last row is the card's own edge, not a divider between two
+   rows — it keeps the border below, and takes no line of its own. */
+.list-row:last-child::after { content: none; }
+.list-row:first-child { border-radius: 14px 14px 0 0; border-top: 1px solid var(--card-border); }
+.list-row:last-child { border-radius: 0 0 14px 14px; border-bottom: 1px solid var(--card-border); }
+.list-row:first-child:last-child { border-radius: 14px; }
+
+/* A tappable row that should still read as a grouped card: reset the browser's
+   default button chrome (font, alignment, top border) so button.list-row matches
+   the div.list-row cards used everywhere else, instead of floating as bare text. */
+button.list-row {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-top-width: 0;
+}
+
+/* A button does not inherit the page's font. Left alone it falls back to the
+   platform's form font — Arial here — so every button label in the app was set in
+   a different, wider, squarer typeface than the text beside it. Most obvious where
+   a button sits next to a non-button: "Mark All as Present" at 11px took up as much
+   room as the 12px count pill beside it. Family only, so each button keeps the
+   size and weight its own class or inline style gives it. button.list-row already
+   did this with `font: inherit`; this is the same fix for the other ~146. */
+button { font-family: inherit; }
+
+.btn-primary {
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  border-radius: 12px;
+  padding: 13px 20px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.btn-primary:active { transform: scale(0.97); opacity: 0.88; }
+.btn-primary:disabled { opacity: 0.6; }
+
+/* A blue tinted pill is a transparency, so it takes the colour of whatever it is over —
+   and a #2C2C2E card eats its saturation: 96% on the app's black background, 55% on a
+   card. That desaturation IS the muddy look.
+   Baking the tint opaque was tried and is worse: a fill darker than the card reads as a
+   hole punched in it rather than a control raised off it. What black gives the pill for
+   free is that anything blue lifts off the floor; on a card the only way to get the same
+   lift is MORE blue. 18% -> 28% takes saturation to 67% and is still plainly a tint.
+   The ink stays --blue, Roy's call, made knowing the cost: on the 28% fill it reads
+   2.71:1 against 3.10:1 on the old one. Lightening it to clear 4.5:1 was built and
+   rejected — the blend lands on a pale #78BBFF, and the 45% edge follows currentColor
+   and goes paler still, so the pill stopped reading as the app's blue at all. Keeping
+   the hue is the point of the pill; see also project memory status-pill-contrast-declined.
+   DARK ONLY, and card-scoped. In light mode the ground is white and nothing goes muddy,
+   and off a card the pill is the colour Roy already likes. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .card {
+    --blue-tint: rgba(10, 132, 255, 0.28);
+  }
+}
+:root[data-theme="dark"] .card {
+  --blue-tint: rgba(10, 132, 255, 0.28);
+}
+
+.btn-secondary {
+  background: var(--blue-tint);
+  color: var(--blue);
+  border: none;
+  border-radius: 12px;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.btn-secondary:active { transform: scale(0.97); }
+
+input, select {
+  font-family: inherit;
+  font-size: 16px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--separator);
+  background: var(--card);
+  color: var(--text);
+}
+input:focus, select:focus, textarea:focus, button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+/* iOS Safari gives a date field its own native furniture: an intrinsic minimum
+   width and an inner value box that sizes to its text and carries margins of its
+   own. Together they can push the field wider than the box it was given, so
+   width: 100% is not enough — on a phone the right border ends up off-screen.
+   Dropping the native appearance clamps it, but it also strips iOS's calendar
+   glyph, so the icon is drawn back here as a background — the same trick
+   .select-arrow already uses for the select chevron, and the one thing that
+   guarantees the same icon on every platform rather than whatever each one
+   happens to supply. */
+input[type="date"] {
+  position: relative;
+  appearance: none;
+  -webkit-appearance: none;
+  min-width: 0;
+  max-width: 100%;
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="%238E8E93" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/></svg>');
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 36px;
+}
+input[type="date"]::-webkit-date-and-time-value {
+  text-align: left;
+  margin: 0;
+}
+/* Chrome keeps its own indicator through appearance: none, which would make two
+   icons. Hiding it outright would cost desktop its only way into the picker —
+   clicking the text alone doesn't open one — so it stays, invisible, stretched
+   over the drawn glyph as the click target. On iOS the pseudo-element isn't
+   there at all and tapping the field opens the picker anyway. */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 40px;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* An empty date field draws the browser's own "dd/mm/yyyy" mask. Everywhere else
+   in the app a date field opens with a value, so it never shows — but the Set
+   Override Date Range card opens with every field blank, and a column of format
+   strings reads as filled-in when nothing is. Blanked until the field has a value;
+   the drawn calendar glyph above still says what the box is for. Hidden while
+   focused too — tapping the field opens the date picker on iOS, so the mask would
+   flash up behind the wheel and never be typed into. The moment a date is chosen
+   the class comes off and the value shows. */
+.date-blank::-webkit-datetime-edit {
+  opacity: 0;
+}
+
+/* Select with a custom chevron inset from the right edge (native <select>
+   arrows sit flush against the border and can't be padded). */
+.select-arrow option {
+  color: var(--text);
+}
+.select-arrow {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="%238E8E93" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>');
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 36px;
+}
+/* A select that cannot change is not a dropdown, so it does not wear a dropdown's chevron.
+   The one case today is the personnel picker when EDITING an existing override: which man
+   it belongs to is what identifies the record, so it is shown and locked — and a chevron
+   there invites a tap that does nothing.
+   The class is kept rather than dropped, and that is the point: `appearance: none` has to
+   stay, or the browser draws its OWN arrow in place of the one just removed. Only the image
+   and the room reserved for it go, and 12px is the right padding `input, select` uses
+   everywhere else. Written as :disabled so it holds for any locked select, not just this one. */
+.select-arrow:disabled {
+  background-image: none;
+  padding-right: 12px;
+}
+
+.tab-bar {
+  position: absolute;
+  left: 36px;
+  right: 36px;
+  bottom: calc(10px + env(safe-area-inset-bottom));
+  z-index: 10;
+  display: flex;
+  --tab-gap: 4px;
+  gap: var(--tab-gap);
+  padding: 6px;
+  background: var(--tab-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--tab-border);
+  border-radius: 30px;
+  box-shadow: var(--tab-shadow);
+  transform-origin: bottom center;
+  transition: transform 0.25s ease;
+}
+/* Scrolling down gets the bar out of the way; scrolling up brings it straight back.
+   It SHRINKS rather than hides: a smaller tab is still a tab you can hit, whereas a
+   bar that leaves the screen entirely has people flicking up just to find it again.
+   transform only — it runs on the compositor, and animating left/right/padding here
+   would relayout the whole shell on every frame. The class is toggled from a scroll
+   listener via ref (App.jsx), never React state. */
+.tab-bar.shrunk { transform: scale(0.8) translateY(6px); }
+/* Six tabs are already at 49px; 0.8 would put them under a fingertip.
+   Shrink less so the target survives the state. */
+.tab-bar.compact.shrunk { transform: scale(0.88) translateY(4px); }
+/* Six is the most the app can show — the tab list tops out there (see tabDefs), and
+   Movement is the only one that comes and goes. It appears on a day someone created a
+   manifest, which is a handful of days a year.
+   A .tab-item is flex:1, so the tabs divide the bar between them and the space around
+   each icon IS its tap target — the two cannot be traded separately, and --tab-gap is
+   only 3 of the 41px that showed between two icons. The inset is the whole lever.
+   40px puts six tabs at 49px wide against a 38px height that is already the binding
+   dimension; 20px bought a few more pixels of width but left the icons reading as six
+   things scattered along a strip rather than as one control. A seventh, if one is ever
+   added, lands at 41px — the point at which this inset would need revisiting. */
+.tab-bar.compact { left: 40px; right: 40px; --tab-gap: 3px; }
+.kb-open .tab-bar { display: none; }
+/* While the keyboard is up, let short scroll content settle at the bottom (just above
+   the keyboard) instead of the top, so a focused inline field isn't stranded with a big
+   gap below it. margin-top:auto only takes effect when the content is shorter than the
+   viewport; taller content overflows and scrolls from the top as usual. */
+.kb-open .rc-scroll { display: flex; flex-direction: column; }
+.kb-open .rc-scroll::before { content: ''; margin-top: auto; }
+/* The background scroller's scrollability lives here (not in an inline style) so React
+   can't re-apply overflow-y:auto on a re-render and quietly unlock it. */
+.rc-scroll { overflow-y: auto; overscroll-behavior-y: contain; }
+/* Freeze it while a modal is open: overflow:hidden makes it non-scrollable outright
+   (no scroll range for the compositor to move), and the card is portaled out to <body>
+   so it stays interactive. TWO separate rules on purpose: if the engine can't parse
+   :has(), only that rule is dropped — the .rc-modal-open (JS-toggled) rule still binds. */
+body:has(.rc-modal-overlay) .rc-scroll { overflow: hidden !important; touch-action: none; pointer-events: none; }
+.rc-modal-open .rc-scroll { overflow: hidden !important; touch-action: none; pointer-events: none; }
+/* One blue pill that slides to the tab you tapped, rather than a background that
+   blinks off one button and on to the next. It's a single absolutely-positioned
+   element behind the icons, so only its transform moves — no layout, no repaint of
+   the bar. The maths: every .tab-item is flex:1, so all tabs are the same width, and
+   one step across is the pill's own width plus one gap. --tabs (how many) and --i
+   (which one is active) are set inline by App.jsx; --tab-gap comes from the bar and
+   already accounts for the compact six/seven-tab layout. */
+.tab-pill {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 6px;
+  width: calc((100% - 12px - (var(--tabs) - 1) * var(--tab-gap)) / var(--tabs));
+  background: var(--blue);
+  border-radius: 22px;
+  transform: translateX(calc(var(--i) * (100% + var(--tab-gap))));
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+.tab-item {
+  flex: 1;
+  position: relative; /* above the sliding pill */
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 0;
+  background: none;
+  border: none;
+  border-radius: 22px;
+  color: var(--text-secondary);
+  transition: color 0.2s ease;
+}
+.tab-item.active { color: #fff; }
+
+/* Status name field: a bordered box holding a leading color dot + a borderless
+   input, so the dot sits inside the field's border beside the text (matching the
+   status cells on the main card). */
+.color-name-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 0 12px;
+  border: 1px solid var(--separator);
+  border-radius: 10px;
+  background: var(--card);
+}
+.color-name-field:focus-within { outline: 2px solid var(--blue); outline-offset: 1px; }
+.color-name-field input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 10px 0;
+  border-radius: 0;
+  outline: none;
+}
+
+/* Full-width text input with trailing action icons (locate / clear) inside the
+   field border. Mirrors the default input look; focus ring on the wrapper. */
+.icon-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 0 8px 0 12px;
+  border: 1px solid var(--separator);
+  border-radius: 10px;
+  background: var(--card);
+}
+.icon-field:focus-within { outline: 2px solid var(--blue); outline-offset: 1px; }
+.icon-field input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 10px 0;
+  border-radius: 0;
+  outline: none;
+}
+
+.rc-spin { animation: rc-spin 1s linear infinite; }
+@keyframes rc-spin { to { transform: rotate(360deg); } }
+
+/* Pull-to-refresh spinner: hidden until a pull; shown/positioned via direct DOM
+   style writes (see paintPull/doRefresh) so per-frame drags don't re-render. */
+@media (prefers-reduced-motion: reduce) {
+  .btn-primary:active, .btn-secondary:active { transform: none; }
+  .rc-spin { animation: none; }
+}
+
+/* Closing a sheet: the panel slides back down and the scrim fades with it, instead of
+   the whole thing vanishing between two frames. The exit is JS-driven — React has to
+   keep the node mounted for the length of the animation — so App.jsx adds this class,
+   waits RC_SHEET_EXIT_MS, then unmounts. Duration lives in BOTH places; if you change
+   one, change the other. */
+/* ONE duration for every card that closes, sheet or dialog, so nothing in the app
+   dismisses at a different speed from anything else. --rc-exit is the only place it is
+   written; RC_SHEET_EXIT_MS in src/App.jsx MUST hold the same number in milliseconds,
+   because that is the timer keeping the node mounted long enough to be animated. Change
+   one and you must change the other, or a card is cut off mid-slide or hangs after it. */
+:root { --rc-exit: 320ms; }
+
+@keyframes rc-sheet-out { to { transform: translateY(100%); } }
+@keyframes rc-scrim-out { to { opacity: 0; } }
+.rc-sheet-closing { animation: rc-scrim-out var(--rc-exit) ease forwards; pointer-events: none; }
+.rc-sheet-closing > * { animation: rc-sheet-out var(--rc-exit) cubic-bezier(0.4, 0, 1, 1) forwards; }
+@media (prefers-reduced-motion: reduce) {
+  .rc-sheet-closing, .rc-sheet-closing > * { animation-duration: 1ms; }
+}
+
+/* Centred dialogs — the Admin cards and anything else on MODAL_OVERLAY_STYLE — never
+   came up from the bottom, so they must not leave that way. They fade and settle very
+   slightly, which is what a dialog anchored in the middle of the screen can do without
+   implying a direction it never travelled. */
+@keyframes rc-modal-out { to { opacity: 0; transform: scale(0.96); } }
+.rc-modal-closing { animation: rc-scrim-out var(--rc-exit) ease forwards; pointer-events: none; }
+.rc-modal-closing > * { animation: rc-modal-out var(--rc-exit) ease forwards; }
+@media (prefers-reduced-motion: reduce) {
+  .rc-modal-closing, .rc-modal-closing > * { animation-duration: 1ms; }
+}

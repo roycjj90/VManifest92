@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Scale is pinned at 1. iOS Safari deliberately ignores this in a normal tab
+         (a page is not allowed to take pinch-zoom away from the user there), so on
+         iPhone it only bites once the app is launched from the Home Screen — which
+         is what the two capable tags below are for. Android Chrome honours it in
+         the browser. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <!-- Launch from the Home Screen without browser chrome. Two effects, both
+         wanted: the viewport lock above is honoured, and there is no Aa button to
+         reach for, so the per-site text size that was crowding the platoon header
+         cannot be set in the first place. No status-bar-style tag on purpose —
+         black-translucent would run the app under the clock, and only the bottom
+         inset is handled today. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="VManifest 92" />
+    <!-- Without this iOS has no artwork to save and draws the first letter of the
+         title instead, which is why the Home Screen showed a bare "P". It must be a
+         PNG (iOS ignores SVG here) and must be square and opaque — iOS applies its
+         own corner mask, so the file itself carries none. -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#007AFF" />
+    <title>VManifest 92</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

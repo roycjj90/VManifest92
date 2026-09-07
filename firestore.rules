@@ -1,0 +1,611 @@
+rules_version = '2';
+
+// Hardened rules — Phase 4 of docs/firebase-auth-hardening.md (see the status
+// addendum there for the claim-rule vulnerability analysis and the conventions
+// these string-match against). Publish via Firebase Console → Firestore → Rules.
+//
+// Conventions this file depends on (must match src/App.jsx exactly):
+//   synthetic email  = acc_<accountId>@vmanifest92.local      (authEmailScheme 'a')
+//                    = acc_<accountId>_rN@vmanifest92.local   (      + authEmailVersion N >= 1)
+//   legacy form      = username@vmanifest92.local             (authEmailScheme absent/'u')
+//                    = username_rN@vmanifest92.local          (authEmailVersion N >= 1)
+//   users/{uid}      = { accountId, groupId, isAdmin, isSuperAdmin }
+//   accounts reads are LOCKED DOWN (super admin / own-group admin / self). The
+//   pre-auth login lookup that used to need open reads now goes through
+//   authIndex, which carries no personal data — see that block below.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function myMirror() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return signedIn() && myMirror().isAdmin == true;
+    }
+
+    function isSuperAdmin() {
+      return signedIn() && myMirror().isSuperAdmin == true;
+    }
+
+    function isSelfAccount(accountId) {
+      return signedIn() && myMirror().accountId == accountId;
+    }
+
+    // ---- Today, in Singapore ---------------------------------------------
+    // request.time is UTC. Every date in this app is a local YYYY-MM-DD built
+    // from getFullYear/getMonth/getDate, so a UTC comparison would run eight
+    // hours behind and lock out the whole 00:00-08:00 block of each morning —
+    // exactly when the roll call is taken. SGT has no DST, so a fixed +8 is
+    // correct year-round.
+    function pad2(n) {
+      return n < 10 ? ('0' + string(n)) : string(n);
+    }
+    function sgToday() {
+      return string((request.time + duration.value(8, 'h')).year()) + '-'
+        + pad2((request.time + duration.value(8, 'h')).month()) + '-'
+        + pad2((request.time + duration.value(8, 'h')).day());
+    }
+
+    // A few legacy docs stored authEmailVersion as a string; tolerate both
+    // types (the client normalizes to a number on every successful linkage).
+    function versionSuffix(v) {
+      return (v == null || v == 0 || v == '0' || v == '')
+        ? ''
+        : ('_r' + (v is string ? v : string(v)));
+    }
+
+    // The synthetic email the account's CURRENT stored state maps to. Claims
+    // are matched against stored state — never against request.resource — so a
+    // claimant can't choose the version they authenticate as.
+    //
+    // Two schemes, selected by the account's own authEmailScheme field:
+    //   'a'          -> acc_<accountId>  (current)
+    //   absent / 'u' -> <username>       (legacy)
+    // Login IDs are phone numbers, so a username-derived address would put every
+    // member's number into the Firebase Auth user list and into the public
+    // signUp endpoint's "email already in use" response — an existence oracle
+    // for any number an attacker cares to try. The account doc id is opaque and
+    // already public via authIndex, so keying on it leaks nothing new.
+    //
+    // Absent defaults to the legacy branch, which is what makes this block safe
+    // to publish BEFORE the client that writes the field: existing accounts are
+    // evaluated exactly as they are today until they migrate.
+    function expectedAuthEmail(accountId, accData) {
+      // .get(...): a never-versioned account has no authEmailVersion field, and
+      // reading a missing field raises and denies (incident #3). Absent = 0.
+      // .lower() is load-bearing: Firebase Auth normalizes the entire address, so
+      // a mixed-case Firestore auto-id comes back lowercased in the token and would
+      // never equal the raw id. Mirrors accountAuthEmail in src/App.jsx.
+      return (accData.get('authEmailScheme', 'u') == 'a' ? ('acc_' + accountId.lower()) : accData.username)
+        + versionSuffix(accData.get('authEmailVersion', 0)) + '@vmanifest92.local';
+    }
+
+    // Linking a Firebase Auth uid to an account (first migration, or re-claim
+    // after an admin password reset rotated the version). Requiring the Auth
+    // token's email to equal the account's expected synthetic email is what
+    // stops an arbitrary signed-in uid from claiming someone else's account —
+    // Firebase's signUp endpoint is public, so "has some authenticated uid" is
+    // free for an attacker; "registered this exact reserved email first" is the
+    // narrowest test available without a server. Residual squatting risk on
+    // never-migrated accounts is documented in the plan doc.
+    //
+    // The expected email is deliberately checked against BOTH the stored state
+    // and the proposed state, and required to be equal: this allows linking at
+    // the current version (and normalizing its stored type) but forbids ever
+    // changing the version through this path. Legitimate version bumps already
+    // happen through authorized writes elsewhere (self via isSelfAccount in
+    // changeMyPassword, admin via isAdmin in setAccountPassword) — anchoring a
+    // claim to a version the client itself just chose would let an attacker who
+    // reads the (world-readable) current version pre-register the next one's
+    // synthetic email and win the claim before the real owner ever logs in.
+    // 'password' is allowed in the diff so this same write can retire the
+    // legacy hash once Auth owns the credential (see writeIdentityDocs in
+    // src/App.jsx), but only ever by REMOVING it — the explicit `!('password'
+    // in ...)` check means this path can never be used to set or preserve a
+    // password value, only delete one.
+    // 'authEmailScheme' is deliberately absent from the hasOnly list: flipping an
+    // account from the legacy address to the acc_ one changes what this function
+    // expects, so allowing it here would hand the claimant the same choice the
+    // version check above denies them. The equality check would reject the flip
+    // anyway (the two addresses can never be equal) — leaving the key out makes
+    // that explicit. The scheme is flipped afterwards, by an already-authorized
+    // self-write under isSelfAccount, once the caller demonstrably owns the
+    // account (see reconcileAuthEmailScheme in src/App.jsx).
+    function isClaimingAuthUid(accountId) {
+      return signedIn()
+        && request.resource.data.authUid == request.auth.uid
+        && request.auth.token.email == expectedAuthEmail(accountId, resource.data)
+        && expectedAuthEmail(accountId, request.resource.data) == expectedAuthEmail(accountId, resource.data)
+        && !('password' in request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['authUid', 'authEmailVersion', 'password']);
+    }
+
+    // Failed-login lockout tracking must work while unauthenticated — that's
+    // its whole purpose. Scoped so it can only ever increment the counter and
+    // set a lockout timestamp; useless for anything but self-limiting denial.
+    function isLockoutBump() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['failedAttempts', 'lockedUntil'])
+        && request.resource.data.failedAttempts == resource.data.get('failedAttempts', 0) + 1;
+    }
+
+    match /accounts/{accountId} {
+      // Read lockdown (the exposure closure). Pre-auth lookups now go through
+      // the public authIndex, so accounts no longer needs a world-readable path:
+      //   - super admin: every account (members list uses an unfiltered query)
+      //   - regular admin: only their own group (query is where groupId == theirs)
+      //   - member: only their own doc (query is where __name__ == self)
+      // .get(...) is used for the same missing-field-safety reason as elsewhere
+      // (incident #3). Requires the authIndex-reading client to be DEPLOYED first
+      // — the old client read accounts pre-auth and would break under this.
+      allow read: if isSuperAdmin()
+                  || (isAdmin() && myMirror().groupId == resource.data.get('groupId', ''))
+                  || (signedIn() && resource.data.get('authUid', '') == request.auth.uid);
+      allow create: if isAdmin();
+      allow update: if isAdmin()
+                    || (isSelfAccount(accountId)
+                        && !request.resource.data.diff(resource.data).affectedKeys()
+                             .hasAny(['isAdmin', 'isSuperAdmin', 'groupId']))
+                    || (!signedIn() && isLockoutBump())
+                    || isClaimingAuthUid(accountId);
+      allow delete: if isAdmin();
+    }
+
+    // Public pre-auth lookup index: username(lowercased) -> { accountId,
+    // authEmailVersion, failedAttempts, lockedUntil, password? }. This is what
+    // lets accounts itself be locked down — the login bootstrap must read some
+    // doc before any auth session exists, so that read happens HERE, on a doc
+    // that deliberately carries NO personal data (no display name, group, role,
+    // or phone-as-a-field). `get` is open; `list` is intentionally NOT granted,
+    // so the collection can't be enumerated the way world-readable accounts can.
+    // The residual pre-migration exposure (a legacy SHA-256 hash readable by
+    // someone who already knows the username) is identical to today's accounts
+    // exposure and disappears the moment that account migrates.
+    //
+    // Publishing this block is zero-risk to current operation: it only grants
+    // access to a brand-new collection nothing reads yet. It must go live BEFORE
+    // the client that reads/writes authIndex is deployed.
+    match /authIndex/{uname} {
+      // Caller owns the account this index points at — proven via the account
+      // doc's own authUid, NOT the users/{uid} mirror (which doesn't exist yet
+      // during a first-time migration, when this write first fires).
+      function idxSelf(accountId) {
+        return signedIn()
+          && get(/databases/$(database)/documents/accounts/$(accountId)).data.get('authUid', '') == request.auth.uid;
+      }
+      // Unauthenticated failed-login lockout bump — mirror of accounts'
+      // isLockoutBump; can only ever increment the counter / set a lockout stamp.
+      function idxLockoutBump() {
+        return request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['failedAttempts', 'lockedUntil'])
+          && request.resource.data.failedAttempts == resource.data.get('failedAttempts', 0) + 1;
+      }
+
+      allow get: if true;                 // single-doc login lookup; no list → no enumeration
+      allow create: if isAdmin() || idxSelf(request.resource.data.accountId);
+      allow update: if isAdmin()
+                    || idxSelf(resource.data.accountId)
+                    || (!signedIn() && idxLockoutBump());
+      allow delete: if isAdmin() || idxSelf(resource.data.accountId);
+    }
+
+    // Auth-role mirror — the substitute for custom claims (Admin SDK only).
+    // Security-critical: isAdmin()/isSelfAccount() read this. A self-created
+    // mirror is only accepted once its account doc already names this uid in
+    // authUid (see isClaimingAuthUid), and every field must byte-match that
+    // account doc — nothing is client-asserted independently of it.
+    match /users/{uid} {
+      allow read: if signedIn();
+      // Field access uses .get(key, default), NOT .data.key: an account doc that
+      // predates a field (older accounts had no isSuperAdmin) would otherwise make
+      // .data.<missing> raise and deny, which silently broke re-migration mirror
+      // creation for those accounts (2026-07-04 incident #3 below).
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.accountId is string
+        && get(/databases/$(database)/documents/accounts/$(request.resource.data.accountId)).data.get('authUid', '') == uid
+        && request.resource.data.isAdmin ==
+           get(/databases/$(database)/documents/accounts/$(request.resource.data.accountId)).data.get('isAdmin', false)
+        && request.resource.data.isSuperAdmin ==
+           get(/databases/$(database)/documents/accounts/$(request.resource.data.accountId)).data.get('isSuperAdmin', false)
+        && request.resource.data.groupId ==
+           (get(/databases/$(database)/documents/accounts/$(request.resource.data.accountId)).data.get('groupId', '') == null
+             ? ''
+             : get(/databases/$(database)/documents/accounts/$(request.resource.data.accountId)).data.get('groupId', ''));
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // A group doc holds company-level settings: the reporting location, the ICT
+    // period, the venue schedule, sections, and the platoon's own name/order.
+    // Every screen that edits any of it is super-admin only as of #123, so this
+    // matches the app rather than restricting it. isSuperAdmin() reads the same
+    // users mirror isAdmin() already does — no extra billed get().
+    // Basic admins still write rosters/{groupId} below; that one stays isAdmin().
+    match /groups/{groupId} {
+      allow read: if signedIn();
+      allow write: if isSuperAdmin();
+    }
+
+    // Names-only member roster, denormalized per group so a regular member can see
+    // who's in their group WITHOUT reading other accounts (which stay locked down).
+    // The doc carries ONLY { members: { <accountId>: label } } — no phone/accountFields,
+    // no password hash. Read is scoped to the caller's OWN group via the users mirror
+    // (super admin spans all); admins write it (reconciled from accounts client-side).
+    // Additive/zero-risk like authIndex: publish this block BEFORE deploying the client
+    // that reads/writes rosters. `list` is intentionally not granted (no enumeration).
+    match /rosters/{groupId} {
+      allow get: if isSuperAdmin()
+                 || (signedIn() && myMirror().groupId == groupId);
+      allow write: if isAdmin();
+    }
+
+    // The names of deleted personnel, kept so past attendance still reads back
+    // correctly. A past day's "MC: 3" expands into three names resolved against
+    // the current roster, so deleting an account would leave the count saying 3
+    // while only two names appeared — and nothing else in the app holds that
+    // name once the account doc is gone.
+    //
+    // ONE document (formerMembers/index) mapping accountId -> name, written in
+    // the same batch as the deletion and read once per admin session by the
+    // Count tab. A collection would have cost one read per departed person,
+    // every session. Names only, admins only — the Count tab is admin-only.
+    //
+    // Additive and inert: nothing reads or writes it until the client that does
+    // is deployed. It MUST go live first, though — the write shares a batch with
+    // the account deletion, and a batch is all-or-nothing, so a client deployed
+    // against un-published rules would fail every removal outright.
+    match /formerMembers/{docId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /statuses/{statusId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /groupFields/{fieldId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /accountFields/{fieldId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /locations/{locationId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /adminLocations/{docId} {
+      // Members must READ admin locations to run proximity check-in — handleCheckIn
+      // compares the member's GPS to nearby admins' shared locations. Read was
+      // isAdmin-only, which silently broke proximity for members (adminLocations
+      // stayed empty → always "No Admin Nearby"). Only admins WRITE (share theirs).
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /settings/{docId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // Lockdown — a super-admin switch that stops everyone else signing in, so a
+    // roster can be imported and checked before anyone sees it. The login page
+    // reads it with no Firebase Auth session yet, so `get` has to be open; the
+    // doc holds one boolean and nothing else, and the same reasoning as
+    // authIndex applies (get open, list left denied).
+    //
+    // Deliberately NOT settings/{docId}: that block grants write to any admin,
+    // and rules OR together, so nothing placed under it could ever be
+    // super-admin-only.
+    match /appAccess/{docId} {
+      allow get: if true;
+      allow write: if isSuperAdmin();
+    }
+
+    // Attendance is per-group: doc id is `${date}__${groupId}` and the doc carries
+    // a groupId field. A member self-checks-in and an admin marks — both only
+    // within their OWN group (matched on the mirror's groupId); super admin spans
+    // all. This closes cross-group read/write (a member marking/erasing another
+    // group's records). NOTE: the within-group, entry-level restriction (a member
+    // may only touch their own entry) is deliberately NOT enforced — it needs a
+    // fragile entries-map key diff, and the same-group blast radius is small.
+    match /attendance/{docId} {
+      // The doc id is `${date}__${groupId}`, so the day this write lands on is
+      // readable without touching the document.
+      function attDate() { return docId.split('__')[0]; }
+
+      // A morning roll call goes to higher and then stands. Only a super admin
+      // changes a day that has already passed — for everyone else the board is
+      // a record from the next day on. The UI hides the controls; this is what
+      // makes it true.
+      //
+      // The exception is a supporting document. An MC handed in on Monday and
+      // confirmed on Tuesday has to mark Monday too, and the whole range is
+      // rewritten in one batch — so a write that changes the `docs` map is the
+      // one legitimate way an earlier day still moves. It always carries a
+      // certificate behind it, and removing that certificate is already super
+      // admin only.
+      function pastDayOK() {
+        return attDate() >= sgToday()
+          || isSuperAdmin()
+          || request.resource.data.get('docs', {}) != resource.data.get('docs', {});
+      }
+
+
+      // ---- The freeze -----------------------------------------------------
+      // A frozen day is the morning roll call after it has gone up the chain.
+      // The UI hides the controls; this is what makes it true. See
+      // ~/.claude/plans/freeze-morning-record.md.
+
+      // The men a super admin has reopened. Absent or empty means nothing may
+      // move, which is exactly what a plain freeze is.
+      function reopened() {
+        return resource.data.get('unfrozen', []).toSet();
+      }
+
+      // Every key that moved in this map must belong to a reopened man. The
+      // diff is in-memory over a document already loaded to evaluate the
+      // update, so it costs no read.
+      function movedOnlyReopened(before, after) {
+        return after.diff(before).affectedKeys().hasOnly(reopened());
+      }
+
+      // The roster is NOT a per-man thing. It is the denominator of the figure
+      // that went up ("13/14 accounted"), so it is pinned outright rather than
+      // per man — reopening someone is about his STATUS, never about who was on
+      // parade. The client cooperates: dayStamp() returns null on a frozen day,
+      // so these four are simply absent from the write and, after the merge,
+      // compare equal to what is already stored.
+      function rosterUnchanged() {
+        return request.resource.data.get('members', [])       == resource.data.get('members', [])
+            && request.resource.data.get('sections', {})      == resource.data.get('sections', {})
+            && request.resource.data.get('venueSections', {}) == resource.data.get('venueSections', {})
+            && request.resource.data.get('venuePersons', {})  == resource.data.get('venuePersons', {});
+      }
+
+      // `unfrozen` is a ONE-WAY VALVE for anyone who is not a super admin: names may
+      // come OUT of it, never go in. hasOnly is a subset test — every name in the new
+      // list must already be in the old one — so a platoon admin can lock a man back
+      // down but cannot open one, and the worst he can do is put everybody back under
+      // the freeze. No billed read: resource.data is already loaded to evaluate the
+      // update.
+      //
+      // He needs this because the re-lock shares a batch with the status that triggers
+      // it, and he is often the one recording that status: without the valve his whole
+      // write is denied and the status change goes down with it.
+      function unfrozenOnlyShrinks() {
+        return request.resource.data.get('unfrozen', []).toSet()
+                 .hasOnly(resource.data.get('unfrozen', []).toSet());
+      }
+
+      // Freezing, reopening and unfreezing belong to the super admin alone, and
+      // this is checked on EVERY update rather than only once a day is frozen.
+      // Checking it only when frozen leaves the gate swinging the other way: a
+      // platoon admin could set `frozen: true` on his own open day — freezing is
+      // not his to do — and, because this same function then locks the field, he
+      // could not put it back. He would have locked his own platoon out until a
+      // super admin came to undo it. Verified against the live rules before the
+      // fix: create-already-frozen was denied, but update-to-frozen was allowed
+      // and update-back-to-open was then refused.
+      //
+      // It also stops him writing `frozen: false` in the same breath as the change
+      // he wanted, which would have retired the clause for the rest of the day.
+      // The three display fields are pinned for a different reason: a forged
+      // `frozenByName` puts the wrong officer's name against a figure that has
+      // gone up the chain.
+      function freezeMetaUnchanged() {
+        return request.resource.data.get('frozen', false)    == resource.data.get('frozen', false)
+            && unfrozenOnlyShrinks()
+            && request.resource.data.get('frozenBy', '')     == resource.data.get('frozenBy', '')
+            && request.resource.data.get('frozenByName', '') == resource.data.get('frozenByName', '')
+            && request.resource.data.get('frozenAt', 0)      == resource.data.get('frozenAt', 0);
+      }
+
+      // `docs` is inside the gate, unlike in pastDayOK's exception. An
+      // unverified upload calls writeDayEntry(recorded = false), which writes
+      // `entries: { [id]: deleteField() }` — it DELETES the man's morning row.
+      // A man marked RSO who hands in a certificate would erase his own RSO and
+      // move the reported figure. So handing one in after the freeze means a
+      // super admin reopens him first.
+      // The per-man gate, which only bites once the day IS frozen. freezeMeta is
+      // no longer part of this conjunction — it is asserted unconditionally on the
+      // update rule, for the reason above.
+      function freezeOK() {
+        return resource.data.get('frozen', false) == false
+            || (rosterUnchanged()
+             && movedOnlyReopened(resource.data.get('entries',   {}), request.resource.data.get('entries',   {}))
+             && movedOnlyReopened(resource.data.get('docs',      {}), request.resource.data.get('docs',      {}))
+             && movedOnlyReopened(resource.data.get('verifiers', {}), request.resource.data.get('verifiers', {}))
+             && movedOnlyReopened(resource.data.get('venues',    {}), request.resource.data.get('venues',    {})));
+      }
+
+      // `resource == null` guard: reading a not-yet-created attendance doc (an
+      // empty day) must succeed and return not-found, not deny — otherwise the
+      // today snapshot errors before anyone has checked in. A missing doc leaks
+      // nothing. The groupId scope only applies once the doc actually exists.
+      allow read: if isSuperAdmin()
+                  || (signedIn()
+                      && (resource == null || resource.data.get('groupId', '') == myMirror().groupId));
+      // Create has no `resource` to compare against, so the docs exception is
+      // "this write brings a document with it" — the first entry on a past day
+      // that a back-dated certificate covers.
+      allow create: if isSuperAdmin()
+                    || (signedIn()
+                        && request.resource.data.get('groupId', '') == myMirror().groupId
+                        && request.resource.data.get('frozen', false) == false
+                        && (attDate() >= sgToday() || request.resource.data.get('docs', {}) != {}));
+      allow update: if isSuperAdmin()
+                    || (signedIn()
+                        && resource.data.get('groupId', '') == myMirror().groupId
+                        && request.resource.data.get('groupId', '') == myMirror().groupId
+                        && pastDayOK()
+                        && freezeMetaUnchanged()
+                        && freezeOK());
+      allow delete: if isSuperAdmin();
+    }
+
+    // Per-person mirror of TODAY's own attendance — doc id is the accountId, one
+    // card per member, overwritten each morning (see mirrorSelfCard in src/App.jsx).
+    //
+    // Why it exists: attendance is one document per platoon per day, and Firestore
+    // hands out whole documents only. A basic member reads exactly one line of that
+    // board (their own status), but subscribing to it billed them a read for every
+    // OTHER member's change too — N members each paying N reads at muster. Admins
+    // still watch the board because they genuinely need every row; members watch
+    // this instead, at one read per change to their own row.
+    //
+    // Grants no authority that isn't already held: every writer here also controls
+    // the board write this accompanies (a member marks themselves, an admin marks
+    // anyone), and the two always go in one atomic batch. Read is self-or-admin —
+    // a member can only ever name their own accountId through isSelfAccount.
+    //
+    // Note: admin writes are NOT group-scoped here, unlike the board. Scoping would
+    // cost another get() per write to look up the target's group, and the blast
+    // radius is a stale status on one card whose matching board write the attendance
+    // rules would have rejected anyway.
+    //
+    // Additive and zero-risk to publish early: nothing reads or writes this
+    // collection until the client that does is deployed. It MUST go live first,
+    // though — the card write shares a batch with the board write, and a batch is
+    // all-or-nothing, so a client deployed against un-published rules would fail
+    // every attendance write, not just the mirror.
+    match /attendanceSelf/{accountId} {
+      allow read: if isAdmin() || isSelfAccount(accountId);
+      allow write: if isAdmin() || isSelfAccount(accountId);
+    }
+
+    // Supporting documents attached to a status (an MC certificate and the like).
+    // The file itself lives in the `parts` sub-collection as native Bytes, split at
+    // ~900 KB because a Firestore doc caps at 1 MiB — Cloud Storage went billing-only
+    // in Feb 2026 and this project stays on the free tier. Medical data, so reads are
+    // scoped tighter than anything else here: the person themselves, admins of THEIR
+    // platoon, super admins.
+    //
+    // Scoping comes from the document id, not a get() on the parent. The id is
+    // `${startDate}__${groupId}__${accountId}` (same shape as attendance), and
+    // Firestore ids are alphanumeric so `__` is an unambiguous separator. A parent
+    // lookup would be billed once per part read — six reads to open one 5-part PDF —
+    // whereas myMirror() is already fetched and is cached per evaluation.
+    //
+    // Additive and zero-risk to publish early: nothing reads or writes this
+    // collection until the client that does is deployed. It MUST go live first,
+    // though — the file shares one atomic batch with the attendance write, so a
+    // client deployed against un-published rules would fail the whole status write.
+    match /mcDocs/{uploadId} {
+      function mcGroup()   { return uploadId.split('__')[1]; }
+      function mcAccount() { return uploadId.split('__')[2]; }
+      function mcAdmin() {
+        return isSuperAdmin() || (isAdmin() && myMirror().groupId == mcGroup());
+      }
+      function mcSelf() {
+        return signedIn()
+          && myMirror().accountId == mcAccount()
+          && myMirror().groupId == mcGroup();
+      }
+
+      allow get: if mcAdmin() || mcSelf();
+      // Not granted below super admin: only the purge card iterates this collection,
+      // and an enumerable list of medical documents is exactly what shouldn't exist.
+      allow list: if isSuperAdmin();
+      allow create: if mcAdmin() || mcSelf();
+      // "Locked once an admin has confirmed the dates" is enforced here, not just in
+      // the UI — and it costs nothing, since verifiedAt is on the doc being written.
+      // .get(...) because an unverified record has no such field at all (incident #3).
+      allow update, delete: if mcAdmin()
+                            || (mcSelf() && resource.data.get('verifiedAt', null) == null);
+
+      // uploadId is still in scope here, so the parts inherit the parent's scoping
+      // without a read. Parts are addressed by index (0…chunks-1) and the count lives
+      // on the parent, so no list is ever needed.
+      match /parts/{idx} {
+        allow get, write: if mcAdmin() || mcSelf();
+      }
+    }
+
+    // The outfield vehicle manifest for one date — vehicles, seat assignments, and the
+    // ADVANCE PARTY / MAIN BODY split. Company-wide by necessity: a vehicle carries
+    // people from more than one platoon, so this cannot live in a per-platoon day doc
+    // the way activities can.
+    //
+    // Doc id is a YYYY-MM-DD date, except `movements/fleet` — the saved vehicle list a
+    // new manifest is populated from. Same block covers both; the fleet holds no
+    // personal data at all, just callsigns and seat counts.
+    //
+    // Admin-only in both directions, and NOT group-scoped. A platoon admin can read the
+    // whole manifest because a truck mixes platoons and a half-readable manifest is
+    // useless; the names they'd otherwise be unable to resolve (accounts reads are
+    // group-scoped) ride along denormalised on each assignment, exactly as rosters and
+    // formerMembers already do. Write is isAdmin() because a platoon sergeant seating
+    // their own people is the normal case, and the blast radius is a seating plan for
+    // one morning — not a record that has gone up the chain.
+    //
+    // Members never read this. Their own vehicle and role are mirrored onto their
+    // attendanceSelf card, which they already listen to, so this collection costs a
+    // member nothing and needs no member-facing scope.
+    //
+    // Deliberately NOT under settings/{docId} or the attendance block: it is a plan,
+    // not a record, and coupling it to attendance would drag it into pastDayOK() and
+    // the freeze for no reason.
+    //
+    // Additive and inert: nothing reads or writes this collection until the client that
+    // does is deployed, so this is safe to publish first — and it MUST go first, since
+    // the assignment write shares an atomic batch with the attendanceSelf card write.
+    match /movements/{docId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /attendanceArchive/{docId} {
+      allow read: if isAdmin();
+      allow write: if isSuperAdmin();
+    }
+
+    match /checkinTokens/{tokenId} {
+      allow read, write: if signedIn();
+    }
+
+    // One-account-per-device-per-day lock. Doc id is a random client-generated
+    // deviceId held in localStorage; fields are { date, accountId, accountDisplay }.
+    //
+    // `read` used to be open to any signed-in user, which let ANY member list the
+    // whole collection — a cross-group view of who logged in today and on which
+    // device, in an app that otherwise scopes everything by group. Split into
+    // get/list: the only caller that iterates this collection is the admin
+    // Settings card, whose listener already sits behind `if (account.isAdmin)`
+    // in src/App.jsx, so restricting `list` breaks nothing. A single-doc `get`
+    // stays open to every signed-in user because login must read its own lock
+    // before claiming it — and a deviceId is an unguessable random value, so
+    // knowing the id is itself the authorization.
+    //
+    // create/update stay open for the same reason: login writes its own lock,
+    // and the rule has no way to tie a client-generated deviceId back to the
+    // caller. Forging a lock against a specific person would require guessing
+    // their deviceId, which is not feasible.
+    //
+    // DELETE is still open — deliberately, and temporarily. Clearing a lock
+    // defeats the entire anti-buddy-check-in control, so it belongs to admins
+    // (clearDeviceLock, Admin tab). But the DEV quick-login buttons clear it as
+    // a regular user so role switching never trips a lockout, and that call is
+    // wrapped in a bare try/catch — tightening delete now would break testing
+    // silently. Swap to `isAdmin()` in the same change that removes the dev
+    // buttons (see the pre-launch checklist in CLAUDE.md).
+    match /deviceLogins/{deviceId} {
+      allow get: if signedIn();
+      allow list: if isAdmin();
+      allow create, update: if signedIn();
+      allow delete: if signedIn();   // -> isAdmin() when the dev buttons go
+    }
+  }
+}
