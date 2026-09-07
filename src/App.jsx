@@ -394,9 +394,15 @@ const SEG_MS = 300
 //
 // The id has to carry the kind because an outfield and an activity can both start on the
 // same Monday, and a date alone would put them on one document.
-const MV_KINDS = ['outfield', 'activity']
+// One company ran exactly two manifests at a time, split by kind, because the kind was
+// really a proxy for which attendance status the manifest rostered from. The statuses
+// are gone and five companies need many manifests at once, so a manifest is now just a
+// document with a name and a date range, and there can be as many as the work needs.
+//
+// `kind` survives as ONE thing only: whether the move has waves (an outfield's advance
+// party and main body) or not. It is a property of the move, not a slot it occupies.
 const movementKind = (m) => (m && m.kind) || 'outfield'
-const movementDocId = (kind, date) => `${kind}__${date}`
+const newMovementId = () => 'mv_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
 // Keeps a popup mounted for the length of its exit animation after the state that opened
 // it goes away. Pass the value (or flag) the popup renders from; render from what comes
 // back instead, and hang .rc-sheet-closing off the second return. Every close path is
@@ -1949,9 +1955,10 @@ export default function App() {
   // the earliest running one of EACH kind. `movement` is whichever the admin has selected in
   // the header, so everything downstream still reads a single manifest and does not have to
   // know there are two.
-  const [movements, setMovements] = useState({ outfield: null, activity: null })
-  const [mvKind, setMvKind] = useState('outfield')
-  const movement = movements[mvKind] || null
+  const [movements, setMovements] = useState([])
+  // Which manifest is open. Null is the LIST — the tab's home, and where it lands.
+  const [openMovementId, setOpenMovementId] = useState(null)
+  const movement = movements.find((m) => m.id === openMovementId) || null
   // The manifest's day as a plain string. Effects key off THIS, not off `movement` — the
   // object is a fresh identity on every snapshot, so depending on it would tear down and
   // re-subscribe (and re-bill) the attendance listeners on every keystroke an admin makes
@@ -2419,7 +2426,10 @@ export default function App() {
       // Earliest running one of each kind. Two outfields at once is not a thing the app
       // offers, so a second one of a kind can only be leftover data — taking the earliest
       // matches what a single-manifest build did and keeps the choice predictable.
-      setMovements(Object.fromEntries(MV_KINDS.map((k) => [k, live.find((m) => movementKind(m) === k) || null])))
+      // Every live manifest, not one of each kind. Earliest first: the move-out
+      // happening tomorrow is the one being worked on, and the one in three weeks can
+      // wait further down the list.
+      setMovements(live)
     })
   }, [account, dayKey])
 
@@ -2463,12 +2473,11 @@ export default function App() {
 
   // Land on a manifest that exists. An admin who opens the tab to "No Vehicles Assigned Yet" while
   // the other kind is live and running would think the app had lost it.
+  // A manifest that is deleted, or whose last day rolls over at midnight, drops out of
+  // the listener — and the screen would sit on it showing nothing. Back to the list.
   useEffect(() => {
-    const has = (k) => (account?.isAdmin ? !!movements[k] : mySeats.some((x) => x.kind === k))
-    if (has(mvKind)) return
-    const other = MV_KINDS.find(has)
-    if (other) setMvKind(other)
-  }, [movements, mySeats, mvKind, account])
+    if (openMovementId && !movements.some((m) => m.id === openMovementId)) setOpenMovementId(null)
+  }, [movements, openMovementId])
 
 
   // The rosters are written AT MUTATION TIME, not reconciled from a full read — the
@@ -2907,7 +2916,7 @@ export default function App() {
   // The manifest a write is FOR is named by its id. `date` is still written as a field — it
   // is the day the roster is drawn from, and every date test downstream reads it — but it no
   // longer decides which document is touched.
-  const movementById = (id) => MV_KINDS.map((k) => movements[k]).find((m) => m && m.id === id) || null
+  const movementById = (id) => movements.find((m) => m && m.id === id) || null
 
   function saveMovement(id, date, patch) {
     return movementWrite(() => setDoc(doc(db, 'movements', id), { date, year: parseInt(date.slice(0, 4), 10), ...patch }, { merge: true }))
@@ -4057,16 +4066,6 @@ export default function App() {
   }
   const movementRoster = movementRosterFor(movement)
 
-  // The manifest kinds that actually EXIST — the same list the segmented control is built
-  // from, hoisted so a swipe and a tap can never disagree about what is next to what. An
-  // admin counts a manifest; a member counts a SEAT on one.
-  const mvKindsShown = MV_KINDS.filter((k) => (account.isAdmin ? !!movements[k] : mySeats.some((x) => x.kind === k)))
-  const mvIdx = mvKindsShown.indexOf(mvKind)
-  const mvPrevKind = mvIdx > 0 ? mvKindsShown[mvIdx - 1] : ''
-  const mvNextKind = mvIdx >= 0 && mvIdx < mvKindsShown.length - 1 ? mvKindsShown[mvIdx + 1] : ''
-  // Two pages at most, and only when both manifests are running. Everyone who sees the
-  // segments gets the gesture — a member with a seat on each kind included.
-  const movementSwipe = tab === 'movement' && mvKindsShown.length > 1
 
   // Minutes this admin's shared location will still let personnel check in. This
   // number IS the explanation the Personnel Check-In card used to spell out in a
@@ -4186,7 +4185,7 @@ export default function App() {
             it used to sit in is the very thing being edited, so the notice moved every time
             the manifest grew. Only on the Movement tab: it is the only place it means
             anything, and an admin on the Today board does not need telling. */}
-        {tab === 'movement' && account.isAdmin && movements[mvKind] && movements[mvKind].published === false && (
+        {tab === 'movement' && account.isAdmin && movement && movement.published === false && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 8px' }}>
             <span style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, minWidth: 0, padding: '8px 10px', borderRadius: 10, background: DRAFT_TINT, border: BANNER_EDGE, color: DRAFT_INK }}>
               <Pencil size={16} color={DRAFT_INK} style={{ flexShrink: 0 }} />
@@ -4198,7 +4197,7 @@ export default function App() {
                 belong to the super admin. A platoon admin still sees the banner, because it is
                 the answer to "why can my men not see this yet". */}
             {account.isSuperAdmin && (
-              <BannerChip onClick={() => setMovementPublished(movements[mvKind].id, true)} style={{ background: DRAFT_TINT, color: DRAFT_INK }}>Publish</BannerChip>
+              <BannerChip onClick={() => setMovementPublished(movement.id, true)} style={{ background: DRAFT_TINT, color: DRAFT_INK }}>Publish</BannerChip>
             )}
           </div>
         )}
@@ -4241,34 +4240,7 @@ export default function App() {
               <button className={adminSubTab === 'unassigned' ? 'active' : ''} onClick={() => setAdminSubTab('unassigned')}>Unassigned</button>
             </div>
           </div>
-        ) : tab === 'movement' ? (() => {
-          /* Which manifest is on screen. The same control the platoon tabs use, in the same
-             place, because it answers the same question — which of these am I looking at.
-             Every admin, not only a super admin: a platoon admin seats his own men on
-             whichever manifest is running.
-
-             Only the manifests that EXIST, for everyone. A segment for a kind nobody has
-             set up leads to an empty screen, and it is not how one gets made anyway: both
-             kinds are created from Admin › Vehicle Manifest, which is also the only route
-             when there is no manifest at all and this whole tab is hidden.
-
-             An admin counts a manifest as existing; a member counts a SEAT on one. A draft
-             writes no seat cards, so a manifest still being built does not exist for him —
-             which is the one thing Draft Mode is for. On a single kind the lone segment
-             fills the track, reading as a label rather than a choice he failed to make. */
-          const kinds = mvKindsShown
-          if (!kinds.length) return null
-          return (
-            <div className={`segmented segmented--fill${kinds.length === 1 ? ' segmented--solo' : ''}`}>
-              <span className="seg-pill" />
-              {kinds.map((k) => (
-                <button key={k} className={mvKind === k ? 'active' : ''} onClick={() => setMvKind(k)}>
-                  {k === 'activity' ? 'Activity' : 'Outfield'}
-                </button>
-              ))}
-            </div>
-          )
-        })() : tab === 'account' ? (
+        ) : tab === 'account' ? (
           <div className="segmented segmented--auto">
             <span className="seg-pill" />
             <button className={theme === 'system' ? 'active' : ''} onClick={() => setTheme('system')}>System</button>
@@ -4314,7 +4286,7 @@ export default function App() {
       <div
         ref={scrollRef}
         className="rc-scroll"
-        style={{ flex: 1, padding: 16, paddingTop: 10, paddingBottom: 90, position: 'relative', overflowX: groupSwipe || adminSwipe || movementSwipe ? 'hidden' : undefined }}
+        style={{ flex: 1, padding: 16, paddingTop: 10, paddingBottom: 90, position: 'relative', overflowX: groupSwipe || adminSwipe ? 'hidden' : undefined }}
       >
         {tab === 'group' && (() => {
           // One platoon's Personnel list. It costs nothing to draw a neighbour: a super
@@ -4356,66 +4328,29 @@ export default function App() {
             myGroup={groups.find((g) => g.id === account.groupId) || null} savedLocations={savedLocations} locationsReady={locationsReady}
           />
         )}
-        {tab === 'movement' && isAdmin && movement && movementRoster && (() => {
-          // One manifest. A neighbour is inert, so nothing that seats a man or publishes a
-          // plan reaches it — a page parked off the side of the screen must not be able to
-          // change a manifest nobody is looking at.
-          const mvPage = (kind, live) => {
-            const mv = movements[kind] || null
-            const roster = movementRosterFor(mv)
-            if (!mv || !roster) return null
-            return (
-              // Keyed on the manifest, so switching kinds is a FRESH screen rather than
-              // the old one handed new props. Without it MovementView keeps the state it
-              // worked out at mount — above all "a single-vehicle manifest opens itself",
-              // which is decided once from whichever manifest happened to be up first. The
-              // page swipe made that visible (the peek is a new instance and obeyed the
-              // rule; the page you landed on did not), but the pills always did it too.
-              <MovementView
-                key={mv.id}
-                movement={mv} roster={roster} accounts={accounts} groups={groups} companies={companies} account={account}
-                assignToVehicle={live ? assignToVehicle : SWIPE_NOOP} setMovementRole={live ? setMovementRole : SWIPE_NOOP} unassignFromMovement={live ? unassignFromMovement : SWIPE_NOOP}
-                setMovementPublished={live ? setMovementPublished : SWIPE_NOOP}
-                onSetUpVehicles={live ? (() => setMovementSetupOpen(true)) : SWIPE_NOOP}
-              />
-            )
-          }
-          return (
-            <SwipePages
-              enabled={movementSwipe}
-              hasPrev={!!mvPrevKind} hasNext={!!mvNextKind}
-              onPrev={() => setMvKind(mvPrevKind)}
-              onNext={() => setMvKind(mvNextKind)}
-              prev={movementSwipe && mvPrevKind ? mvPage(mvPrevKind, false) : null}
-              next={movementSwipe && mvNextKind ? mvPage(mvNextKind, false) : null}
-            >
-              {mvPage(mvKind, true)}
-            </SwipePages>
-          )
-        })()}
-        {/* The Manifests tab is always present now — it is what this app is for — so it
-            has to answer for itself on the ordinary day when no manifest has been built.
-            It used to come and go with the work, and an admin who opened it with nothing
-            running got a blank screen under a tab bar.
-
-            The button is the only route in: manifests are built from this card, and
-            sending someone to Settings to find it was the old way round. */}
+        {/* The admin's Manifests tab. Two screens, one tab: the LIST, which is home,
+            and one manifest opened out of it. There is no selector in the header any
+            more — with five companies there can be a dozen manifests running, and a row
+            of segments is a control that only works while there are two of them. */}
+        {tab === 'movement' && isAdmin && movement && movementRoster && (
+          <MovementView
+            key={movement.id}
+            movement={movement} roster={movementRoster} accounts={accounts} groups={groups} companies={companies} account={account}
+            onBack={() => setOpenMovementId(null)}
+            assignToVehicle={assignToVehicle} setMovementRole={setMovementRole} unassignFromMovement={unassignFromMovement}
+            setMovementPublished={setMovementPublished}
+            onSetUpVehicles={() => setMovementSetupOpen(true)}
+          />
+        )}
         {tab === 'movement' && isAdmin && !(movement && movementRoster) && (
-          <EmptyState icon={Truck} title="No Manifest Yet" body="Build one to start seating personnel onto vehicles.">
-            <button className="btn-primary" style={{ width: '100%' }} onClick={() => setMovementSetupOpen(true)}>Build a Manifest</button>
-          </EmptyState>
+          <ManifestList
+            movements={movements} companies={companies}
+            onOpen={(id) => setOpenMovementId(id)}
+            onNew={() => setMovementSetupOpen(true)}
+          />
         )}
         {tab === 'movement' && !isAdmin && (
-          <SwipePages
-            enabled={movementSwipe}
-            hasPrev={!!mvPrevKind} hasNext={!!mvNextKind}
-            onPrev={() => setMvKind(mvPrevKind)}
-            onNext={() => setMvKind(mvNextKind)}
-            prev={movementSwipe && mvPrevKind ? <MyMovementView seat={mySeats.find((x) => x.kind === mvPrevKind) || null} kind={mvPrevKind} account={account} /> : null}
-            next={movementSwipe && mvNextKind ? <MyMovementView seat={mySeats.find((x) => x.kind === mvNextKind) || null} kind={mvNextKind} account={account} /> : null}
-          >
-            <MyMovementView seat={mySeats.find((x) => x.kind === mvKind) || null} kind={mvKind} account={account} />
-          </SwipePages>
+          <MySeatsView seats={mySeats} account={account} />
         )}
         {tab === 'admin' && isAdmin && (() => {
           // One Settings page. Only two things differ between them, and both are about
@@ -4478,8 +4413,9 @@ export default function App() {
           onBack={mvSetupBack || undefined}>
           <MovementSetupCard
             onBackChange={(fn) => setMvSetupBack(() => fn)}
-            movements={movements} fleet={movementFleet}
+            movement={movement} fleet={movementFleet}
             onDone={() => setMovementSetupOpen(false)}
+            onCreated={(id) => setOpenMovementId(id)}
             eventFrom={(groups[0] || {}).eventFrom || ''} eventTo={(groups[0] || {}).eventTo || ''}
             saveMovement={saveMovement} removeMovement={removeMovement} removeMovementVehicle={removeMovementVehicle}
             setVehicleParty={setVehicleParty} setMovementRange={setMovementRange} setMovementPublished={setMovementPublished}
@@ -5452,7 +5388,73 @@ function ReorderList({ items, staticItems, onReorder, renderRow, ghostLabel, row
 // attendanceSelf card — they never touch the manifest, which is company-wide and would
 // hand every member every name in the company. Read-only by nature: a manifest is the
 // admin's plan, and there is nothing on this screen a passenger could change.
-function MyMovementView({ seat, kind, account }) {
+// The Manifests tab's home screen. Every live manifest, earliest first, because the
+// move happening tomorrow is the one being worked on.
+//
+// The companies on each row are the ones REPRESENTED on that manifest — read off the
+// seats actually filled, not off an owning company, because a manifest has none: a
+// convoy can carry men from two companies and both have to see themselves in the list.
+function ManifestList({ movements, companies, onOpen, onNew }) {
+  if (!movements.length) {
+    return (
+      <EmptyState icon={Truck} title="No Manifest Yet" body="Build one to start seating personnel onto vehicles.">
+        <button className="btn-primary" style={{ width: '100%' }} onClick={onNew}>Build a Manifest</button>
+      </EmptyState>
+    )
+  }
+  return (
+    <div style={{ maxWidth: 520, margin: '0 auto' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {movements.map((mv) => {
+          const vehicles = Object.keys(mv.vehicles || {}).length
+          const assign = mv.assign || {}
+          const seats = Object.keys(assign).length
+          // In company ORDER, not in the order men happened to be seated — the list is
+          // scanned, and a row whose companies reshuffle as seats are added is unreadable.
+          const ids = new Set(Object.values(assign).map((a) => a.c || ''))
+          const coys = companies.filter((c) => ids.has(c.id)).map((c) => c.name)
+          const draft = mv.published === false
+          const span = (mv.until && mv.until !== mv.date) ? outlookDates({ from: mv.date, to: mv.until }) : fmtNav(mv.date)
+          return (
+            <button key={mv.id} className="card" onClick={() => onOpen(mv.id)}
+              style={{ display: 'block', width: '100%', textAlign: 'left', font: 'inherit', color: 'inherit', cursor: 'pointer' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                <span style={{ fontSize: 16, fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{mv.name || 'OUTFIELD'}</span>
+                {/* Draft is the state that matters — nothing has reached a phone yet — so
+                    it is the one that gets a colour. Published is the quiet default. */}
+                <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', padding: '3px 9px', borderRadius: 999, textTransform: 'uppercase',
+                  ...(draft ? { background: DRAFT_TINT, border: BANNER_EDGE, color: DRAFT_INK } : { background: 'var(--separator)', color: 'var(--text-secondary)' }) }}>
+                  {draft ? 'Draft' : 'Published'}
+                </span>
+              </div>
+              <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--text-secondary)' }}>{span}</p>
+              <p style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--text-secondary)' }}>
+                {vehicles} {vehicles === 1 ? 'vehicle' : 'vehicles'} · {seats} {seats === 1 ? 'seat' : 'seats'}
+                {coys.length ? ` · ${coys.join(', ')}` : ''}
+              </p>
+            </button>
+          )
+        })}
+      </div>
+      <button className="btn-primary" style={{ width: '100%', marginTop: 14 }} onClick={onNew}>Build a Manifest</button>
+    </div>
+  )
+}
+
+// A rider's screen. One seat opens straight onto the vehicle — which is the ordinary
+// case and the whole point of the app. Several stack, because a man booked on two moves
+// has to see both; PULSE 92 could only ever show him one, and the second booking
+// silently overwrote the first.
+function MySeatsView({ seats, account }) {
+  if (!seats.length) return <MyMovementView seat={null} account={account} />
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      {seats.map((s) => <MyMovementView key={s.id} seat={s} account={account} />)}
+    </div>
+  )
+}
+
+function MyMovementView({ seat, account }) {
   // He is on one manifest and not the other — which is the ordinary case, not an error.
   // The segment stays selectable so he can see for himself rather than wondering whether
   // the app has lost something.
@@ -5463,7 +5465,7 @@ function MyMovementView({ seat, kind, account }) {
           <Truck size={38} style={{ color: 'var(--separator)' }} />
           <div style={{ fontSize: 17, fontWeight: 600, marginTop: 14 }}>No Vehicle Assigned</div>
           <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: '7px 0 0', lineHeight: 1.5 }}>
-            You are not on the {kind === 'activity' ? 'Activity' : 'Outfield'} manifest.
+            You are not on a vehicle manifest.
           </p>
         </div>
       </div>
@@ -5482,7 +5484,11 @@ function MyMovementView({ seat, kind, account }) {
             board uses: an activity has no party, so a seat with no party is not a move-out
             and must not call itself one. Never the stored movement name — a member is being
             told which vehicle he is on, and the manifest itself is an admin's document. */}
-        <h2 style={headerStyle}>{seat.party ? 'Outfield Vehicle' : 'Vehicle'}</h2>
+        {/* The manifest's own name, not "Outfield Vehicle". A rider can be on two moves
+            at once now, and two cards headed the same thing is the one case this screen
+            exists to tell apart. Falls back to the old wording for a seat written before
+            manifests carried names. */}
+        <h2 style={headerStyle}>{seat.name || (seat.party ? 'Outfield Vehicle' : 'Vehicle')}</h2>
         <div className="card">
           {/* Callsign, plate, then type on one line: the callsign is what he is told to
               board, the plate is how he finds it in the vehicle park, and the type is what
@@ -5597,7 +5603,7 @@ function Sheet({ onClose, closing, children }) {
   )
 }
 
-function MovementView({ movement, roster, accounts, groups, companies, account, assignToVehicle, setMovementRole, unassignFromMovement, setMovementPublished, onSetUpVehicles }) {
+function MovementView({ movement, roster, accounts, groups, companies, account, onBack, assignToVehicle, setMovementRole, unassignFromMovement, setMovementPublished, onSetUpVehicles }) {
   const [picker, setPicker] = useState(null)   // { vehicleId }
   const [sheet, setSheet] = useState(null)     // { accountId }
   const [search, setSearch] = useState('')
@@ -5639,7 +5645,7 @@ function MovementView({ movement, roster, accounts, groups, companies, account, 
   // The REPORT keeps the full name. That message is pasted into a chat that carries no
   // selector with it, so it has to say what it is. Derived rather than two hardcoded cases,
   // so a third roster source added later names itself.
-  const manifestTitle = 'Vehicle Manifest'
+  const manifestTitle = movement.name || 'Vehicle Manifest'
   const reportTitle = isActivity ? 'VEHICLE MANIFEST' : 'OUTFIELD VEHICLE MANIFEST'
   const unassigned = roster.people.filter((p) => !assign[p.id])
   // Platoon counts, and whether they need two lines.
@@ -6274,6 +6280,15 @@ function MovementView({ movement, roster, accounts, groups, companies, account, 
               "Hide", not "Unpublish": it says what happens to the people reading it, in a
               word nobody has to be taught, and the banner it produces spells out the rest. */}
           <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+            {/* The way back to the list. A pill on the left pointing left, in the slot the
+                app's other back controls use — this screen is one level down now, and
+                without it the only way out is the tab bar, which lands you here again. */}
+            {onBack && (
+              <button onClick={onBack} aria-label="All manifests"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 1, padding: '3px 9px 3px 5px', marginBottom: 8, borderRadius: 999, background: 'var(--blue-tint)', border: BLUE_EDGE, fontSize: 11, fontWeight: 600, color: 'var(--blue)', flexShrink: 0 }}>
+                <ChevronLeft size={12} />All
+              </button>
+            )}
             <h2 style={{ ...headerStyle, margin: '0 0 8px', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{manifestTitle}</h2>
             {movement.published !== false && account.isSuperAdmin && (
               <button aria-label="Edit manifest" onClick={() => setMovementPublished(movement.id, false)}
@@ -6705,10 +6720,11 @@ function MovementView({ movement, roster, accounts, groups, companies, account, 
 //
 // Opens on Outfield Setup rather than the leftmost tab: the fleet is the thing you set up
 // once, and the manifest is the thing you come back to.
-function MovementSetupCard({ movements, fleet, onDone, saveMovement, removeMovement, removeMovementVehicle, setVehicleParty, setMovementRange, setMovementPublished, saveFleetVehicle, removeFleetVehicle, onBackChange, eventFrom, eventTo }) {
-  const [seg, setSeg] = useState('outfield')
-  const kind = seg === 'fleet' ? null : seg
-  const movement = (kind && movements[kind]) || null
+function MovementSetupCard({ movement, fleet, onDone, saveMovement, removeMovement, removeMovementVehicle, setVehicleParty, setMovementRange, setMovementPublished, saveFleetVehicle, removeFleetVehicle, onBackChange, eventFrom, eventTo, onCreated }) {
+  // Two segments now, not three: the manifest being edited, and the standing fleet.
+  // The third was "which of the two slots am I filling", and there are no slots any more.
+  const [seg, setSeg] = useState('manifest')
+  const [kind, setKind] = useState(movementKind(movement))
   // The roster source IS the kind, not a choice made alongside it. A move-out draws from the
   // first status flagged rosterSource (Outfield); an activity draws from Present, stored as
   // `''` — the same empty value that has always meant "the default status".
@@ -6717,6 +6733,11 @@ function MovementSetupCard({ movements, fleet, onDone, saveMovement, removeMovem
   // exactly as with MC's requiresDoc. If no status carries the flag there is nothing for a
   // move-out to roster from, and it falls back to Present rather than to nothing at all.
   const isActivity = kind === 'activity'
+  // A manifest is named by whoever builds it. It used to name itself after the status it
+  // rostered from, because there were exactly two and the status was the difference
+  // between them; with many running at once the name is how you tell them apart in the
+  // list, so it is typed.
+  const [nameDraft, setNameDraft] = useState(movement?.name || '')
   // An outfield and an activity only happen DURING an ICT, so the period is the frame their
   // dates sit in - the same frame a reporting-location override already sits in. Enforced
   // only while a period exists: with none set there is nothing to be inside, and a manifest
@@ -6745,19 +6766,11 @@ function MovementSetupCard({ movements, fleet, onDone, saveMovement, removeMovem
   // could be; an activity rostered from Present is not one. Written on every save, so an
   // older manifest picks up its own name the next time it is touched.
   //
-  const name = (kind === 'activity' ? 'ACTIVITY' : 'OUTFIELD')
+  const name = (nameDraft.trim() || (kind === 'activity' ? 'ACTIVITY' : 'OUTFIELD')).toUpperCase()
   // Each tab is a different manifest, so the draft starts again on its own dates when the
   // tab changes. Without this, switching to Activity would show the outfield's dates in a
   // form that saves to the activity.
-  const firstSeg = useRef(seg)
-  useEffect(() => {
-    if (firstSeg.current === seg) return
-    firstSeg.current = seg
-    if (!kind) return
-    const mv = movements[kind]
-    setDate(mv?.date || startDefault())
-    setTo(mv?.until || mv?.date || startDefault())
-  }, [seg])
+
   const [adding, setAdding] = useState(false)
   const [vehDraft, setVehDraft] = useState(null)
   // What the vehicle looked like when the form opened, so Save can tell a change from a look.
@@ -6794,8 +6807,13 @@ function MovementSetupCard({ movements, fleet, onDone, saveMovement, removeMovem
   // never moves. It is a key, not a fact — letting it track `date` would mean changing a
   // start date silently created a SECOND document and orphaned the first, which is what the
   // date-keyed build did.
-  const mvId = movement?.id || movementDocId(kind, date)
+  // Minted once and then never moved. It is a key, not a fact — letting it track the date
+  // would mean changing a start date silently created a SECOND document and orphaned the
+  // first, which is what the date-keyed build did.
+  const idRef = useRef(movement?.id || newMovementId())
+  const mvId = movement?.id || idRef.current
   const dirty = !movement || date !== movement.date || to !== (movement.until || movement.date)
+    || name !== (movement.name || '') || kind !== movementKind(movement)
   const saveSetup = async () => {
     // An empty end date is its own complaint, not a comparison. A date field hands back an
     // empty string both when it was never filled in and when what was typed is not a real
@@ -6804,18 +6822,10 @@ function MovementSetupCard({ movements, fleet, onDone, saveMovement, removeMovem
     // that has thirty days.
     if (!to) { setMsg('Pick a valid End Date.'); return }
     if (to < date) { setMsg('End Date cannot be before the Start Date.'); return }
-    // The two manifests cannot cover the same day. A man holds ONE seat — his card carries a
-    // single movement — so a day claimed by both would let him be seated twice and show him
-    // whichever seat was written last. Blocked here, at the dates, rather than policed later
-    // at every assignment.
-    //
-    // Ranges overlap when each starts on or before the other ends. ISO dates compare as
-    // strings, so this needs no parsing.
-    const other = movements[kind === 'outfield' ? 'activity' : 'outfield']
-    if (other && date <= (other.until || other.date) && other.date <= to) {
-      setMsg(`Dates overlap with ${kind === 'outfield' ? 'Activity' : 'Outfield'}.`)
-      return
-    }
+    // Manifests may overlap freely now. The old build refused it because a man held ONE
+    // seat and a day claimed by two manifests would show him whichever was written last.
+    // Seats are keyed by manifest id (see writeSeat), so a man on two moves sees both —
+    // which is the case this whole phase exists for.
     // Belt to the pickers' braces below. min/max stops the arrows and the calendar going
     // outside the period, but a TYPED date is not held by them - the browser accepts it and
     // merely reports the field as invalid, which nothing here reads.
@@ -6825,7 +6835,11 @@ function MovementSetupCard({ movements, fleet, onDone, saveMovement, removeMovem
     // A manifest that does not exist yet is created as a DRAFT — the whole point is that it
     // is built before anyone is told about it. An existing one keeps whatever it already is,
     // so saving a date on a published manifest does not silently pull it off every phone.
-    if (!(await run(saveMovement(mvId, date, { name: name.trim(), kind, until: to, ...(movement ? null : { published: false }) })))) return
+    const isNew = !movement
+    if (!(await run(saveMovement(mvId, date, { name, kind, until: to, ...(isNew ? { published: false } : null) })))) return
+    // A manifest just built is the one you want to be looking at — otherwise the card
+    // closes onto the list and you have to find what you just made.
+    if (isNew && onCreated) onCreated(mvId)
     // Each rider's own card carries the movement's dates AND its party, so a changed end
     // date or a changed roster source has to be mirrored onto all of them — saveMovement
     // alone only touches the manifest.
@@ -6864,7 +6878,7 @@ function MovementSetupCard({ movements, fleet, onDone, saveMovement, removeMovem
   async function addFromFleet(id) {
     const v = fleet[id]
     if (!v) return
-    if (await run(saveMovement(mvId, date, { name: name.trim(), kind, until: to, ...(movement ? null : { published: false }), vehicles: { [id]: { ...v, party: 'main', order: vehicles.length } } }))) setAdding(false)
+    if (await run(saveMovement(mvId, date, { name, kind, until: to, ...(movement ? null : { published: false }), vehicles: { [id]: { ...v, party: 'main', order: vehicles.length } } }))) setAdding(false)
   }
 
   // Every field, not just the callsign: a vehicle with no plate or no seat count is a
@@ -6907,12 +6921,12 @@ function MovementSetupCard({ movements, fleet, onDone, saveMovement, removeMovem
       // went out that day, not a view of the fleet as it is now.
       if (ok && d.id && inManifest.has(d.id)) {
         const cur = (movement && movement.vehicles && movement.vehicles[d.id]) || {}
-        ok = await run(saveMovement(mvId, date, { name: name.trim(), kind, until: to, vehicles: { [d.id]: { ...veh, party: cur.party || 'main', order: cur.order ?? vehicles.length } } }))
+        ok = await run(saveMovement(mvId, date, { name, kind, until: to, vehicles: { [d.id]: { ...veh, party: cur.party || 'main', order: cur.order ?? vehicles.length } } }))
       }
     } else {
       const isNew = !d.id
       const id = d.id || newId()
-      ok = await run(saveMovement(mvId, date, { name: name.trim(), kind, until: to, vehicles: { [id]: { ...veh, party: d.party || 'main', order: d.order ?? vehicles.length } } }))
+      ok = await run(saveMovement(mvId, date, { name, kind, until: to, vehicles: { [id]: { ...veh, party: d.party || 'main', order: d.order ?? vehicles.length } } }))
       // A vehicle typed in here ALWAYS joins the standing fleet as well. This used to be a
       // `Save to fleet` tick, off by default, and the default was wrong: the fleet is the
       // trucks the unit has, and typing a callsign, type, plate and seat count is saying
@@ -7000,7 +7014,7 @@ function MovementSetupCard({ movements, fleet, onDone, saveMovement, removeMovem
     <>
       <div className="segmented segmented--fill" style={{ marginBottom: 8 }}>
         <span className="seg-pill" />
-        {[['fleet', 'Vehicle Fleet'], ['outfield', 'Outfield Setup'], ['activity', 'Activity Setup']].map(([key, text]) => (
+        {[['fleet', 'Vehicle Fleet'], ['manifest', 'Manifest Setup']].map(([key, text]) => (
           <button key={key} type="button" className={seg === key ? 'active' : ''} onClick={() => setSeg(key)}>{text}</button>
         ))}
       </div>
@@ -7012,13 +7026,30 @@ function MovementSetupCard({ movements, fleet, onDone, saveMovement, removeMovem
               of it. Same day in both is the one-day move-out.
               Side by side because they are one answer — a span reads left to right, and
               stacked they looked like two unrelated settings. */}
+          {/* The name, and whether the move has waves. Both used to be implied by which
+              of two slots the manifest sat in; with many running at once the name is how
+              you tell them apart in the list, so it is typed, and the waves are a
+              property of the move rather than of the slot. */}
+          <p style={{ ...label0, margin: '0 0 3px' }}>Manifest Name</p>
+          <input value={nameDraft} onChange={(e) => { setNameDraft(e.target.value); setMsg('') }}
+            placeholder={kind === 'activity' ? 'e.g. RANGE DAY' : 'e.g. OUTFIELD'}
+            style={{ width: '100%', marginBottom: 10, textTransform: 'uppercase' }} />
+          <p style={{ ...label0, margin: '0 0 3px' }}>Move Type</p>
+          <div className="segmented segmented--fill" style={{ marginBottom: 10 }}>
+            <span className="seg-pill" />
+            {/* An outfield moves in waves — an advance party and a main body, each with
+                its own half of the printed manifest. An activity is one group going one
+                place, so it has no wave to name. */}
+            <button className={kind === 'outfield' ? 'active' : ''} onClick={() => { setKind('outfield'); setMsg('') }}>Outfield</button>
+            <button className={kind === 'activity' ? 'active' : ''} onClick={() => { setKind('activity'); setMsg('') }}>Activity</button>
+          </div>
           {/* Labels on their own row above the inputs, the same shape the ICT Period card
               uses — which is what leaves a slot for Reset's warning to sit directly under
               the chip instead of below the date boxes. */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, alignItems: 'end', margin: '0 0 3px' }}>
             {/* Named after the tab you are on, so the two forms cannot be mistaken for each
                 other at a glance — they are otherwise identical. */}
-            <p style={{ ...label0, margin: 0 }}>{kind === 'activity' ? 'Activity' : 'Outfield'} Start Date</p>
+            <p style={{ ...label0, margin: 0 }}>Start Date</p>
             <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 8, minHeight: 22 }}>
               <p style={{ ...label0, margin: 0 }}>End Date</p>
               {/* Throws away the whole manifest, so it sits up here as a small chip

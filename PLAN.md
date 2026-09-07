@@ -258,17 +258,27 @@ the 1 MB limit. No need to split manifests across docs.
 **Writes:** seating one person = 1 merged write. Publishing = 1 batch (manifest +
 1 per rider), under the 500-write batch cap. Free tier allows 20k writes/day. Fine.
 
-## Phase 5 — Many manifests at once  ⬜
+## Phase 5 — Many manifests at once  ✅ DONE
 
 PULSE 92 allows exactly 2 live manifests split by kind (outfield / activity)
 because it is one company. 5 companies need many.
 
-- Drop the two-kind split (`MV_KINDS`, the segmented control, swiping between
-  kinds). It was only ever a proxy for the attendance status.
+- **Done.** `MV_KINDS`, the header segmented control and the swipe between kinds are
+  gone. `movements` is a list, not `{ outfield, activity }`. `kind` survives as **one**
+  thing only: whether the move has waves (an outfield's advance party and main body) or
+  not — a property of the move, not a slot it occupies. It is now a Move Type toggle in
+  the setup card, beside a **typed manifest name**.
+- **The overlap rule is gone with it.** The old build refused two manifests covering the
+  same day because a man held one seat and the second booking would overwrite the first.
+  Seats are keyed by manifest id, so a man on two moves now sees both — verified.
 - The Manifests tab becomes a **list**: upcoming, newest first, each row showing
   name, dates, vehicle count, seat count, Draft/Published badge, and the companies
   **represented** on it (e.g. "B Coy, C Coy") — not an owning company.
-- Tap one → the existing `MovementView` seating screen, mostly unchanged.
+- Tap one → the existing `MovementView` seating screen, mostly unchanged, with an
+  **All** pill back to the list and the manifest's own name as its heading.
+- A rider's screen stacks **every** seat they hold, each headed by its manifest's name —
+  two cards both saying "Outfield Vehicle" is the one thing this screen exists to tell
+  apart.
 - **Keep** Draft vs Published exactly as-is: nothing reaches a phone until publish;
   unpublish pulls it all back.
 - **Keep** the saved fleet list (`movements/fleet`) as-is.
