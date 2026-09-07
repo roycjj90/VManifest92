@@ -143,15 +143,32 @@ present) · Platoon · Personnel · Admin. Delete the `showMovementTab` gate.
     version was a real PULSE 92 bug — the 2nd booking silently overwrote the 1st.
   - Attached (no-login) people get **no** seat doc — skipped in `writeSeat()`.
 
-## Phase 3 — Add the company level  ⬜
+## Phase 3 — Add the company level  ✅ DONE
 
 Shape goes `person → platoon → section` **⇒** `person → COMPANY → platoon → section`.
 
-- New collection `companies/{id}` = `{ name, order }`. Seed 5.
+- New collection `companies/{id}` = `{ name, order }`. **Seeded with five** — A, B, C,
+  D and S&T Coy — guarded by name, so a rename in the app is never undone by the next
+  app start.
 - `groups/{id}` (platoon) gains `companyId`.
-- `accounts/{id}` gains `companyId` — stored flat, so queries filter without a
-  second read.
+- `accounts/{id}` gains `companyId` — stored flat, so filtering 500 people by company
+  is a field test rather than a join back through the platoon list on every render.
+  Written by `createAccount`, by `setAccountGroup` when a man changes platoon, and by
+  `setGroupCompany`, which re-writes it for **every man in the platoon** when the
+  platoon changes company. Five reads per app open for the company list itself.
 - Sections unchanged (`miniGroups` inside the platoon doc).
+- **Admin:** a Company card (create / rename / reorder / delete, with a count of the
+  platoons filed under each), and a company selector on every platoon row. Deleting a
+  company leaves its platoons unfiled rather than silently moving them.
+- **Platoon tab:** two segmented tracks, company over platoon, with the platoon row
+  filtered to the company on screen. The company row only appears when there is more
+  than one company. Which tab is active is **derived**, not corrected by an effect —
+  the stored id is only what was last tapped, and it goes stale on a cold start or when
+  a company's last platoon moves out from under it.
+- **Assign sheet:** the platoon accordions are grouped under company headings, in
+  company order, with anything unfiled last. The search box was already there.
+- **Seats** carry the rider's company as id + name (`c` / `cn`), exactly as they carry
+  platoon — a rider can only read their own seat, so the name has to travel with it.
 
 **2 permission levels** (revised down from 4, Roy's call): **admin** — sees and seats
 the whole battalion — and **member**, who sees their own seat.

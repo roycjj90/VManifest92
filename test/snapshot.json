@@ -17,7 +17,8 @@
    "info": {
     "Rank": "3SG"
    },
-   "isAdmin": false
+   "isAdmin": false,
+   "companyId": "coy_a"
   },
   "2iNuOBhD5oX9dQOLEycj": {
    "displayName": "LEE CHEE KEONG",
@@ -36,7 +37,8 @@
    "username": "9100411",
    "authEmailVersion": 0,
    "mustChangePassword": false,
-   "memberOrder": 0
+   "memberOrder": 0,
+   "companyId": "coy_a"
   },
   "3aBQdWZWJNZRtbv0Rm93": {
    "authEmailScheme": "a",
@@ -55,7 +57,8 @@
    "mustChangePassword": false,
    "username": "9100685",
    "authEmailVersion": 0,
-   "failedAttempts": 0
+   "failedAttempts": 0,
+   "companyId": "coy_a"
   },
   "62Pj3rGLDpnz5JNXjFel": {
    "memberOrder": 0,
@@ -74,7 +77,8 @@
    "info": {
     "Rank": "REC"
    },
-   "displayName": "GOH YONG SHENG"
+   "displayName": "GOH YONG SHENG",
+   "companyId": "coy_a"
   },
   "708SO76ZRct3rDjx0Jsv": {
    "info": {
@@ -93,7 +97,8 @@
    "miniGroupId": "mg_aTzy2U",
    "lockedUntil": null,
    "isAdmin": false,
-   "authEmailVersion": 0
+   "authEmailVersion": 0,
+   "companyId": "coy_b"
   },
   "80b9nnq8iAuawcid53dk": {
    "isSuperAdmin": false,
@@ -112,7 +117,8 @@
    "memberOrder": 0,
    "miniGroupId": "mg_aTzy2U",
    "lockedUntil": null,
-   "authEmailVersion": 0
+   "authEmailVersion": 0,
+   "companyId": "coy_b"
   },
   "MbvvNRe7cI2RIqrueE6u": {
    "nickname": "",
@@ -131,7 +137,8 @@
     "Rank": "PTE"
    },
    "password": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
-   "failedAttempts": 0
+   "failedAttempts": 0,
+   "companyId": "coy_b"
   },
   "O7GjqFIAL1f3MghXp9XY": {
    "authEmailScheme": "a",
@@ -150,7 +157,8 @@
     "Rank": "LCP"
    },
    "groupId": "vICj2xAUCcLcMWBuOZ50",
-   "nickname": ""
+   "nickname": "",
+   "companyId": "coy_a"
   },
   "OEYQx0Vu4v2jE9r4pKE4": {
    "password": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
@@ -169,7 +177,8 @@
    "nickname": "",
    "mustChangePassword": false,
    "lockedUntil": null,
-   "miniGroupId": "mg_tNmsGL"
+   "miniGroupId": "mg_tNmsGL",
+   "companyId": "coy_a"
   },
   "S1fJJlnv7r6ddtdgqPF9": {
    "username": "attached1",
@@ -187,7 +196,8 @@
    "authEmailVersion": 0,
    "displayName": "RAJ KUMAR S/O ARUMUGAM",
    "failedAttempts": 0,
-   "isAdmin": false
+   "isAdmin": false,
+   "companyId": "coy_a"
   },
   "SLNDEn59Kt34ICX0jNUq": {
    "info": {
@@ -206,7 +216,8 @@
    "isAdmin": false,
    "authEmailScheme": "a",
    "lockedUntil": null,
-   "miniGroupId": "mg_MNbmbI"
+   "miniGroupId": "mg_MNbmbI",
+   "companyId": "coy_a"
   },
   "YxokWqz91wH9GbdrP3IN": {
    "groupId": "",
@@ -219,7 +230,8 @@
    "password": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
    "authEmailScheme": "a",
    "username": "admin",
-   "lockedUntil": null
+   "lockedUntil": null,
+   "companyId": ""
   },
   "ZMzLSJTd8jtaG14IXHY9": {
    "username": "9102329",
@@ -238,7 +250,8 @@
    "failedAttempts": 0,
    "info": {
     "Rank": "CPL"
-   }
+   },
+   "companyId": "coy_b"
   },
   "do0GrBO0hcs3VVIgBfbm": {
    "memberOrder": 1,
@@ -257,7 +270,8 @@
    "username": "9102192",
    "groupId": "PwwJsnYlmcvERpjvvflF",
    "isSuperAdmin": false,
-   "displayName": "HO WEI KIAT"
+   "displayName": "HO WEI KIAT",
+   "companyId": "coy_b"
   },
   "eNmsXIQ0lcYkQEYQocfz": {
    "isAdmin": false,
@@ -273,7 +287,8 @@
    },
    "isSuperAdmin": false,
    "username": "user",
-   "password": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"
+   "password": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
+   "companyId": "coy_a"
   },
   "mwAppRLE2OsEhhrAJYnY": {
    "isAdmin": false,
@@ -292,7 +307,8 @@
    "nickname": "",
    "mustChangePassword": false,
    "username": "9100274",
-   "groupId": "FIziF0QefYPDxsktEjOO"
+   "groupId": "FIziF0QefYPDxsktEjOO",
+   "companyId": "coy_a"
   },
   "pJ00Pf7o0aZferKwN9Rw": {
    "username": "9101096",
@@ -311,7 +327,8 @@
    "password": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
    "authEmailScheme": "a",
    "displayName": "TEO WEN JIE",
-   "mustChangePassword": false
+   "mustChangePassword": false,
+   "companyId": "coy_a"
   },
   "qNWkawQjBY5Fc2pOq3zT": {
    "info": {
@@ -330,7 +347,8 @@
    "isSuperAdmin": false,
    "groupId": "FIziF0QefYPDxsktEjOO",
    "mustChangePassword": false,
-   "username": "9100822"
+   "username": "9100822",
+   "companyId": "coy_a"
   },
   "vI6cEbaePpwqldVlqqTB": {
    "mustChangePassword": false,
@@ -349,7 +367,8 @@
    "isSuperAdmin": false,
    "groupId": "vICj2xAUCcLcMWBuOZ50",
    "displayName": "KOH JUN YANG",
-   "username": "9101370"
+   "username": "9101370",
+   "companyId": "coy_a"
   },
   "zBmG6B3NmEumXIk4RuoK": {
    "info": {
@@ -368,7 +387,8 @@
    "isSuperAdmin": false,
    "displayName": "TAN WEI MING",
    "username": "9100137",
-   "authEmailScheme": "a"
+   "authEmailScheme": "a",
+   "companyId": "coy_a"
   },
   "zKjgyRrTGa8TmT4rk00s": {
    "displayName": "SEAH MING FENG",
@@ -387,12 +407,14 @@
    "failedAttempts": 0,
    "groupId": "PwwJsnYlmcvERpjvvflF",
    "lockedUntil": null,
-   "miniGroupId": "mg_QgOFLi"
+   "miniGroupId": "mg_QgOFLi",
+   "companyId": "coy_b"
   }
  },
  "groups": {
   "74tYVCIFLq4aR8gF59Cr": {
-   "name": "General"
+   "name": "General",
+   "companyId": "coy_c"
   },
   "FIziF0QefYPDxsktEjOO": {
    "miniGroups": [
@@ -413,7 +435,8 @@
     }
    ],
    "order": 0,
-   "name": "1 Platoon"
+   "name": "1 Platoon",
+   "companyId": "coy_a"
   },
   "PwwJsnYlmcvERpjvvflF": {
    "miniGroups": [
@@ -434,7 +457,8 @@
     }
    ],
    "name": "3 Platoon",
-   "order": 2
+   "order": 2,
+   "companyId": "coy_b"
   },
   "vICj2xAUCcLcMWBuOZ50": {
    "miniGroups": [
@@ -455,7 +479,8 @@
     }
    ],
    "name": "2 Platoon",
-   "order": 1
+   "order": 1,
+   "companyId": "coy_a"
   }
  },
  "authIndex": {
@@ -666,5 +691,19 @@
   }
  },
  "settings": {},
- "appAccess": {}
+ "appAccess": {},
+ "companies": {
+  "coy_a": {
+   "name": "A Coy",
+   "order": 0
+  },
+  "coy_b": {
+   "name": "B Coy",
+   "order": 1
+  },
+  "coy_c": {
+   "name": "C Coy",
+   "order": 2
+  }
+ }
 }

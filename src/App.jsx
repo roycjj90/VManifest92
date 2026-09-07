@@ -960,8 +960,18 @@ function sortAccountFields(arr) {
   return [...arr].sort((a, b) => (rank(a) - rank(b)) || ((a.order ?? 0) - (b.order ?? 0)))
 }
 
+// The battalion's five companies. Seeded by NAME, so a rename in the app is never
+// undone by the next app start, and a sixth added later is left alone.
+const SEED_COMPANIES = ['A Coy', 'B Coy', 'C Coy', 'D Coy', 'S&T Coy']
+
 async function ensureSeedData() {
   try {
+    const companiesSnap = await getDocs(collection(db, 'companies'))
+    if (companiesSnap.empty) {
+      const batch = writeBatch(db)
+      SEED_COMPANIES.forEach((name, order) => batch.set(doc(collection(db, 'companies')), { name, order }))
+      await batch.commit()
+    }
     const groupsSnap = await getDocs(collection(db, 'groups'))
     const defaultGroupId = groupsSnap.empty
       ? (await addDoc(collection(db, 'groups'), { name: 'General' })).id
@@ -1807,6 +1817,7 @@ export default function App() {
   })
   const [accounts, setAccounts] = useState([])
   const [groups, setGroups] = useState([])
+  const [companies, setCompanies] = useState([])
   const [attendance, setAttendance] = useState({})
   const [attendanceVerifiers, setAttendanceVerifiers] = useState({})
   // Which venue validated each proximity check-in, keyed like attendance itself.
@@ -1962,6 +1973,7 @@ export default function App() {
   // why the split is drawn HERE rather than around `activeGroupId`, whose every change
   // re-points the day's attendance listener.
   const [groupTabGroupId, setGroupTabGroupId] = useState('')
+  const [groupTabCompanyId, setGroupTabCompanyId] = useState('')
   // Share and Scan QR live in the nav bar, above the platoon selector, so they stay
   // put while the roll call scrolls. That is why their state sits up here rather than
   // in TodayView: the buttons are outside it now, and the QR sheet they open is shared
@@ -2222,6 +2234,10 @@ export default function App() {
     if (account.isAdmin) {
       unsubs.push(
         onSnapshot(collection(db, 'groups'), (snap) => setGroups(sort(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))),
+        // Five documents, read once per app open. The company a platoon belongs to is
+        // stored on the platoon, and flattened onto each account as well, so nothing
+        // downstream has to join through this list to filter.
+        onSnapshot(collection(db, 'companies'), (snap) => setCompanies(sort(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))),
         onSnapshot(collection(db, 'groupFields'), (snap) => setGroupFields(sort(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))),
         onSnapshot(collection(db, 'accountFields'), (snap) => setAccountFields(sortAccountFields(snap.docs.map((d) => ({ id: d.id, ...d.data() }))))),
       )
@@ -2733,7 +2749,7 @@ export default function App() {
     // cannot read another platoon's records to find out that a man is on loan, or which
     // section he came from. Left off, his crew list showed an attached man as one of his own
     // while the admin's manifest beside it marked him plainly.
-    const crew = rows.map(([id, a]) => ({ id, n: a.n || '', r: a.r || 'pax', g: a.g || '', gn: platoonNameOf(a.g), ...(a.att ? { att: true } : null), ...(a.sec ? { sec: a.sec } : null) }))
+    const crew = rows.map(([id, a]) => ({ id, n: a.n || '', r: a.r || 'pax', g: a.g || '', gn: platoonNameOf(a.g), ...(a.c ? { c: a.c, cn: a.cn || '' } : null), ...(a.att ? { att: true } : null), ...(a.sec ? { sec: a.sec } : null) }))
     // An attached man never logs in, so a seat document written for him is one nobody
     // can read. He still rides on everyone else's crew list above — only his own copy
     // is skipped.
@@ -2867,7 +2883,11 @@ export default function App() {
         // `n` is what the manifest is READ by (nickname preferred); `fn` is the roll name
         // the Copy Report has to print, because that message goes to higher. Both ride on
         // the seat because a platoon admin cannot resolve either for another platoon's man.
-        next[accId] = { v: vehicleId, r: role, n: memberLabel(a), fn: (a && a.displayName) || memberLabel(a), g: (a && a.groupId) || '' }
+        // Company rides on the assignment exactly as the platoon does — id AND name.
+        // A convoy can carry men from two companies, and the seat is the only thing a
+        // rider can read, so the name has to travel with it rather than be looked up.
+        const cid = (a && a.companyId) || companyOf(a && a.groupId)
+        next[accId] = { v: vehicleId, r: role, n: memberLabel(a), fn: (a && a.displayName) || memberLabel(a), g: (a && a.groupId) || '', c: cid, cn: companyName(cid) }
         // Attached-ness and the section name ride on the seat for the same reason the
         // name and platoon do: `accounts` reads are group-scoped, so a platoon admin
         // cannot look either of them up for a man outside his own platoon. The section is
@@ -3188,7 +3208,7 @@ export default function App() {
     const accountRef = doc(collection(db, 'accounts'))
     const batch = writeBatch(db)
     batch.set(accountRef, {
-      username: uname, displayName: displayName.trim(), nickname: (nickname || '').trim(), groupId: groupId || '', miniGroupId: miniGroupId || '',
+      username: uname, displayName: displayName.trim(), nickname: (nickname || '').trim(), groupId: groupId || '', companyId: companyOf(groupId), miniGroupId: miniGroupId || '',
       // No password field at all on an attached record, rather than an empty one: there
       // is no credential to guess, and nothing for a password reset to rotate.
       ...(attached ? { attached: true } : { password: hash }),
@@ -3491,6 +3511,45 @@ export default function App() {
     }
   }
 
+  // ---- Companies -----------------------------------------------------------
+  // A platoon belongs to a company; a person belongs to a platoon. `companyId` is
+  // ALSO written flat onto each account, so filtering 500 people by company is a
+  // field test rather than a join back through the platoon list on every render.
+  // companyOf() is the one place that resolves it, so the two cannot drift.
+  const companyOf = (groupId) => (groups.find((g) => g.id === (groupId || '')) || {}).companyId || ''
+  const companyName = (companyId) => (companies.find((c) => c.id === (companyId || '')) || {}).name || ''
+
+  async function addCompany(name) {
+    if (!name.trim()) return
+    await addDoc(collection(db, 'companies'), { name: name.trim(), order: companies.length })
+  }
+  async function renameCompany(id, name) {
+    if (!name.trim()) return
+    try { await setDoc(doc(db, 'companies', id), { name: name.trim() }, { merge: true }) } catch (e) {}
+  }
+  // The platoons keep their companyId, which now points at nothing — they read as
+  // unassigned, which is what they are, and re-filing them is one tap each. Deliberately
+  // NOT a cascade: deleting a company must not quietly move its platoons somewhere else.
+  async function removeCompany(id) {
+    try { await deleteDoc(doc(db, 'companies', id)) } catch (e) {}
+  }
+  async function setCompanyOrder(orderedIds) {
+    const batch = writeBatch(db)
+    orderedIds.forEach((id, i) => batch.set(doc(db, 'companies', id), { order: i }, { merge: true }))
+    try { await batch.commit() } catch (e) {}
+  }
+
+  // Moving a platoon between companies moves its people with it. The flat companyId on
+  // each account is a denormalisation, so it has to be re-written here or a man keeps
+  // filtering under the company his platoon has left. One batch, bounded by the platoon.
+  async function setGroupCompany(groupId, companyId) {
+    const batch = writeBatch(db)
+    batch.set(doc(db, 'groups', groupId), { companyId: companyId || '' }, { merge: true })
+    accounts.filter((a) => (a.groupId || '') === groupId)
+      .forEach((a) => batch.set(doc(db, 'accounts', a.id), { companyId: companyId || '' }, { merge: true }))
+    try { await batch.commit() } catch (e) {}
+  }
+
   async function addGroup(name) {
     if (!name.trim()) return
     // A platoon created mid-period joins the period that is already running. The ICT window
@@ -3541,9 +3600,11 @@ export default function App() {
     // realistically straddle, and a second move overwrites the first, which is the honest
     // limit rather than a half-built history nobody can trust.
     try {
+      // companyId rides along with the platoon: it is a copy of the platoon's, kept flat
+      // so a company filter never has to join back through the platoon list.
       await setDoc(doc(db, 'accounts', id), from !== to
-        ? { groupId: to, miniGroupId: '', prevGroupId: from, groupChangedOn: todayISO() }
-        : { groupId: to, miniGroupId: '' }, { merge: true })
+        ? { groupId: to, companyId: companyOf(to), miniGroupId: '', prevGroupId: from, groupChangedOn: todayISO() }
+        : { groupId: to, companyId: companyOf(to), miniGroupId: '' }, { merge: true })
     } catch (e) {}
     await syncUserClaims(id, { groupId: to })
   }
@@ -3645,13 +3706,6 @@ export default function App() {
   // last week. So on a past day an empty platoon is not a thing you can act on, it is just
   // a segment that opens a screen with nothing on it, and the selector drops it.
   // Super admin only, because he is the only one the selector is drawn for.
-  useEffect(() => {
-    if (!account?.isAdmin || tab !== 'today' || !activeGroupId) return
-    if (openScreen !== 'activities' && !(account.isSuperAdmin && selectedDate < todayISO())) return
-    if (peopledGroupIds.has(activeGroupId)) return
-    const first = groups.find((g) => peopledGroupIds.has(g.id))
-    if (first) setActiveGroupId(first.id)
-  }, [account, tab, openScreen, activeGroupId, groups, accounts, selectedDate])
 
   // Movement is the one tab that can disappear out from under you — it goes the moment the
   // outfield's last day rolls over at midnight. The bar drops it while the app stays
@@ -3728,11 +3782,31 @@ export default function App() {
   const activeGroupIdx = selectorGroups.findIndex((g) => g.id === activeGroupId)
   const prevGroupId = activeGroupIdx > 0 ? selectorGroups[activeGroupIdx - 1].id : ''
   const nextGroupId = activeGroupIdx >= 0 && activeGroupIdx < selectorGroups.length - 1 ? selectorGroups[activeGroupIdx + 1].id : ''
+  // The companies that actually HAVE a platoon, plus an "Unfiled" tab only while some
+  // platoon is not in one. A company with nothing under it is a tab onto an empty screen.
+  const companyTabs = [
+    ...companies.filter((c) => groups.some((g) => (g.companyId || '') === c.id)),
+    ...(groups.some((g) => !companies.some((c) => c.id === (g.companyId || ''))) ? [{ id: '', name: 'Unfiled' }] : []),
+  ]
+  // Which company and platoon are actually ON SCREEN. DERIVED, not corrected by an
+  // effect: the stored ids are only what was last tapped, and both can go stale — on a
+  // cold start before companies load, or when a company's last platoon is moved out from
+  // under it. Falling back here means the screen is never briefly blank, and it keeps
+  // this out of a hook, which could not live down here anyway: everything it needs is
+  // declared below the login early-return, and a hook behind a conditional return is not
+  // a hook React accepts.
+  const companyTab = companyTabs.some((c) => c.id === groupTabCompanyId) ? groupTabCompanyId : ((companyTabs[0] || {}).id || '')
+  const groupTabGroups = companyTabs.length
+    ? groups.filter((g) => (companies.some((c) => c.id === (g.companyId || '')) ? g.companyId : '') === companyTab)
+    : groups
+  const groupTab = groupTabGroups.some((g) => g.id === groupTabGroupId) ? groupTabGroupId : ((groupTabGroups[0] || {}).id || '')
   // The Platoon tab's own neighbours. Same shape as the three above, off its own platoon,
-  // because browsing this tab must not move the one Today is pointed at.
-  const groupTabIdx = groups.findIndex((g) => g.id === groupTabGroupId)
-  const groupTabPrevId = groupTabIdx > 0 ? groups[groupTabIdx - 1].id : ''
-  const groupTabNextId = groupTabIdx >= 0 && groupTabIdx < groups.length - 1 ? groups[groupTabIdx + 1].id : ''
+  // because browsing this tab must not move the one Today is pointed at. Swiping stays
+  // INSIDE the company on screen: the pills above are what crosses between companies.
+  const groupTabIdx = groupTabGroups.findIndex((g) => g.id === groupTab)
+  const groupTabPrevId = groupTabIdx > 0 ? groupTabGroups[groupTabIdx - 1].id : ''
+  const groupTabNextId = groupTabIdx >= 0 && groupTabIdx < groupTabGroups.length - 1 ? groupTabGroups[groupTabIdx + 1].id : ''
+
   const canPageGroups = !!account.isSuperAdmin && groups.length > 1
   // Swipeable exactly when the pills are up. On a platoon-only sheet there is no selector,
   // because that sheet exists in one platoon and nowhere else — so there is nothing to
@@ -3968,19 +4042,30 @@ export default function App() {
           </div>
         )}
         {account.isSuperAdmin && tab === 'group' ? (
-          /* The Platoon tab's, and only its. Today, Count and Activity carry theirs BELOW
-             the nav bar's separator instead — see pinnedSelector. The wrapper's 8px of
-             padding is pulled back out by a -8px margin, so the reserved scrollbar strip
-             tucks into the nav bar's own bottom padding and the separator stays level with
-             every other tab. */
+          /* Two tracks, company over platoon, because a battalion's worth of platoons in
+             one row is a scroller you hunt through. The company row only appears once
+             there is more than one company to tell apart — on a single-company unit it
+             would be a control with one option. */
+          <>
+          {companyTabs.length > 1 && (
+            <div className="segmented-scroll">
+              <div className="segmented">
+                <span className="seg-pill" />
+                {companyTabs.map((c) => (
+                  <button key={c.id} className={companyTab === c.id ? 'active' : ''} onClick={() => setGroupTabCompanyId(c.id)}>{c.name}</button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="segmented-scroll">
             <div className="segmented">
               <span className="seg-pill" />
-              {groups.map((g) => (
-                <button key={g.id} className={groupTabGroupId === g.id ? 'active' : ''} onClick={() => setGroupTabGroupId(g.id)}>{g.name}</button>
+              {groupTabGroups.map((g) => (
+                <button key={g.id} className={groupTab === g.id ? 'active' : ''} onClick={() => setGroupTabGroupId(g.id)}>{g.name}</button>
               ))}
             </div>
           </div>
+          </>
         ) : tab === 'admin' && account.isSuperAdmin ? (
           /* Super admin only. A basic admin administers one platoon and lands on it
              automatically (adminScopedSubTab), so there is nothing here for them to
@@ -4094,7 +4179,7 @@ export default function App() {
               prev={groupSwipe && groupTabPrevId ? groupPage(groupTabPrevId, false) : null}
               next={groupSwipe && groupTabNextId ? groupPage(groupTabNextId, false) : null}
             >
-              {groupPage(groupTabGroupId, true)}
+              {groupPage(groupTab, true)}
             </SwipePages>
           )
         })()}
@@ -4127,7 +4212,7 @@ export default function App() {
               // rule; the page you landed on did not), but the pills always did it too.
               <MovementView
                 key={mv.id}
-                movement={mv} roster={roster} accounts={accounts} groups={groups} account={account}
+                movement={mv} roster={roster} accounts={accounts} groups={groups} companies={companies} account={account}
                 assignToVehicle={live ? assignToVehicle : SWIPE_NOOP} setMovementRole={live ? setMovementRole : SWIPE_NOOP} unassignFromMovement={live ? unassignFromMovement : SWIPE_NOOP}
                 setMovementPublished={live ? setMovementPublished : SWIPE_NOOP}
                 onSetUpVehicles={live ? (() => setMovementSetupOpen(true)) : SWIPE_NOOP}
@@ -4178,7 +4263,8 @@ export default function App() {
           // it — so a neighbour is given neither the popup nor the setter that clears it.
           const adminPage = (sub, live) => (
           <AdminView
-            accounts={accounts} groups={groups} account={account}
+            accounts={accounts} groups={groups} companies={companies} account={account}
+            addCompany={addCompany} renameCompany={renameCompany} removeCompany={removeCompany} setCompanyOrder={setCompanyOrder} setGroupCompany={setGroupCompany}
             createAccount={createAccount} removeAccount={removeAccount} returnToPlatoon={returnToPlatoon} addGroup={addGroup} removeGroup={removeGroup} renameGroup={renameGroup}
             reorderGroup={reorderGroup} setGroupOrder={setGroupOrder} setAccountGroup={setAccountGroup}
             addMiniGroup={addMiniGroup} renameMiniGroup={renameMiniGroup} removeMiniGroup={removeMiniGroup} reorderMiniGroup={reorderMiniGroup} setMiniGroupOrder={setMiniGroupOrder}
@@ -4621,49 +4707,6 @@ function AccountView({ account, changeMyPassword, accountFields, setAccountInfo,
         </section>
       )}
 
-      {myGroup && (
-        <section>
-          <h2 style={headerStyle}>Reporting Location</h2>
-          {(() => {
-            // What's coming, in order, so an ICT-period exception is followed by the
-            // standing location for the days it doesn't cover. Two or more places
-            // become mini cards in a 2-column grid, matching Personnel Info. Only a
-            // fully dated run gets a date line — the standing location has no range.
-            const runs = venueRuns(account, myGroup, savedLocations)
-            // Locations still loading: stay blank rather than flash "not set".
-            if (!locationsReady) return <div className="card" style={{ minHeight: 42 }} />
-            if (runs.length === 0) return <div className="card"><p style={{ fontSize: 13, margin: 0, color: 'var(--text-secondary)' }}>Not Set</p></div>
-            // Same pin + venueColor as the Platoon and Settings cards: blue for the
-            // company location, orange for an override sending you elsewhere.
-            const venueLine = (r) => (
-              /* Against the run's OWN start date. A run is a stretch of days and the company
-                 may report somewhere else across it — compared with TODAY's company location,
-                 the company's own next place read as an override of itself. */
-              <p style={{ fontSize: 14, fontWeight: 500, margin: 0, display: 'flex', alignItems: 'center', gap: 3, minWidth: 0, color: venueColor(r.id, myGroup, r.from || undefined) }}>
-                <MapPin size={14} style={{ flexShrink: 0 }} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.loc.label}</span>
-              </p>
-            )
-            if (runs.length === 1) return (
-              <div className="card">
-                {venueLine(runs[0])}
-                {runs[0].dated && <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '2px 0 0' }}>{outlookDates({ from: runs[0].from, to: runs[0].to })}</p>}
-              </div>
-            )
-            return (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                {runs.map((r) => (
-                  <div key={r.from} className="card" style={{ padding: '12px 10px 12px 16px', display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
-                    {venueLine(r)}
-                    {r.dated && <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: 0 }}>{outlookDates({ from: r.from, to: r.to })}</p>}
-                  </div>
-                ))}
-              </div>
-            )
-          })()}
-        </section>
-      )}
-
       <section>
         <h2 style={headerStyle}>Account</h2>
         <PopupCard title="Password" icon={Lock} subtitle="Change account password." open={openPopup === 'login'} onOpen={() => setOpenPopup('login')} onClose={() => setOpenPopup(null)}>
@@ -4728,29 +4771,6 @@ function GroupMembersView({ groupAccounts, account, myGroup, groupFields, accoun
                 </div>
               )
             })}
-          </div>
-        </section>
-      )}
-      {isAdmin && myGroup && (
-        <section>
-          <h2 style={headerStyle}>Reporting Location</h2>
-          <div className="card">
-            {(() => {
-              const v = effectiveVenue(null, myGroup, savedLocations, todayISO())
-              if (!locationsReady) return <p style={{ margin: 0, minHeight: 20 }} />
-              return (
-                <>
-                  {/* Same pin + venueColor as the Settings cards and the Section
-                      headings below: blue for the company location, orange when an
-                      override is sending this platoon somewhere else. */}
-                  <p style={{ fontSize: 14, fontWeight: 500, margin: 0, display: 'flex', alignItems: 'center', gap: 3, minWidth: 0, color: v.loc ? venueColor(v.id, myGroup, v.from || undefined) : 'var(--text-secondary)' }}>
-                    {v.loc && <MapPin size={14} style={{ flexShrink: 0 }} />}
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v.loc ? v.loc.label : 'Not Set'}</span>
-                  </p>
-                  {v.from && <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '2px 0 0' }}>{outlookDates({ from: v.from, to: v.to || v.from })}</p>}
-                </>
-              )
-            })()}
           </div>
         </section>
       )}
@@ -4844,20 +4864,6 @@ function GroupMembersView({ groupAccounts, account, myGroup, groupFields, accoun
                   <p style={{ fontWeight: 500, margin: 0, overflowWrap: 'anywhere' }}>{shownMember.displayName || '—'}</p>
                 </div>
               </div>
-              {(() => {
-                const v = effectiveVenue(shownMember, myGroup, savedLocations, todayISO())
-                return (
-                  <div>
-                    <p style={cardHeaderStyle}>Reporting Location</p>
-                    <div className="card">
-                      <p style={{ fontWeight: 500, margin: 0, color: 'var(--text)', overflowWrap: 'anywhere' }}>
-                        {v.loc ? v.loc.label : '—'}
-                      </p>
-                      {v.from && <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '2px 0 0' }}>{outlookDates({ from: v.from, to: v.to || v.from })}</p>}
-                    </div>
-                  </div>
-                )
-              })()}
               {accountFields.length > 0 && (
                 <div>
                   <p style={cardHeaderStyle}>Personnel Info</p>
@@ -5429,7 +5435,7 @@ function Sheet({ onClose, closing, children }) {
   )
 }
 
-function MovementView({ movement, roster, accounts, groups, account, assignToVehicle, setMovementRole, unassignFromMovement, setMovementPublished, onSetUpVehicles }) {
+function MovementView({ movement, roster, accounts, groups, companies, account, assignToVehicle, setMovementRole, unassignFromMovement, setMovementPublished, onSetUpVehicles }) {
   const [picker, setPicker] = useState(null)   // { vehicleId }
   const [sheet, setSheet] = useState(null)     // { accountId }
   const [search, setSearch] = useState('')
@@ -5787,6 +5793,13 @@ function MovementView({ movement, roster, accounts, groups, account, assignToVeh
       .filter((p) => pickRole !== 'driver' || canDrive(p))
       .filter((p) => !q || memberLabel(p).toLowerCase().includes(q))
     const byGroup = groups.map((g) => [g, pool.filter((p) => (p.groupId || '') === g.id)]).filter(([, list]) => list.length)
+    // Platoons grouped under the company they belong to, in company order, with anything
+    // unfiled last under a heading that says so rather than silently vanishing. Only
+    // companies that actually have somebody in the pool get a heading.
+    const byCompany = [
+      ...companies.map((c) => [c.id, c.name, byGroup.filter(([g]) => (g.companyId || '') === c.id)]),
+      ['', 'No Company', byGroup.filter(([g]) => !companies.some((c) => c.id === (g.companyId || '')))],
+    ].filter(([, , list]) => list.length)
     // Counted across every platoon, not per platoon: what makes the sheet unusable is
     // its total height, and five names spread over three platoons still fits.
     const foldByDefault = pool.length > 5
@@ -5897,9 +5910,19 @@ function MovementView({ movement, roster, accounts, groups, account, assignToVeh
             Gated on there being any: an empty stack still carried its 12px bottom
             margin, which stacked onto the empty-state line's own 14px and left 26px
             of nothing under "Everyone is already assigned." */}
-        {byGroup.length > 0 && (
+        {byCompany.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
-        {byGroup.map(([g, list]) => {
+        {byCompany.map(([cid, cname, gs]) => (
+        <Fragment key={cid || 'none'}>
+        {/* The company heading. Shown only when there is more than one to tell apart —
+            on a single-company pool it would be a label over the whole list saying what
+            every card under it already says. Not a fold of its own: two levels of
+            accordion to reach a name is one more tap than picking men is worth, and the
+            platoons inside already fold. */}
+        {byCompany.length > 1 && (
+          <p style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', margin: '4px 4px 0' }}>{cname}</p>
+        )}
+        {gs.map(([g, list]) => {
           // A search overrides the fold — a name filtered down to one hit inside a
           // shut platoon would look like no hit at all. Failing that, an explicit tap
           // wins; failing THAT, the size of the pool decides: a handful of names is
@@ -5966,6 +5989,8 @@ function MovementView({ movement, roster, accounts, groups, account, assignToVeh
             </div>
           )
         })}
+        </Fragment>
+        ))}
         </div>
         )}
         {over && (
@@ -7010,8 +7035,9 @@ function PasswordInput({ value, onChange, onBlur, placeholder, autoComplete }) {
 }
 
 function AdminView({
-  accounts, groups, account,
+  accounts, groups, companies, account,
   createAccount, removeAccount, returnToPlatoon, addGroup, removeGroup, renameGroup, reorderGroup, setGroupOrder, setAccountGroup,
+  addCompany, renameCompany, removeCompany, setCompanyOrder, setGroupCompany,
   addMiniGroup, renameMiniGroup, removeMiniGroup, reorderMiniGroup, setMiniGroupOrder, setAccountMiniGroup, reorderMember,
   lockdown, saveLockdown, setAccountPassword, setAccountDisplayName, setAccountNickname, setAccountUsername, renameMigratedAccount,
   deviceLogins, clearDeviceLock, setLockoutsOpen,
@@ -7032,6 +7058,9 @@ function AdminView({
   const [newAcc, setNewAcc] = useState({ username: '', displayName: '', nickname: '', groupId: '', miniGroupId: '', role: '', attached: false })
   const [accMsg, setAccMsg] = useState('')
   const [newGroupName, setNewGroupName] = useState('')
+  const [newCompanyName, setNewCompanyName] = useState('')
+  const [editingCompanyId, setEditingCompanyId] = useState(null)
+  const [editingCompanyName, setEditingCompanyName] = useState('')
   const [editingGroupId, setEditingGroupId] = useState(null)
   const [editingGroupName, setEditingGroupName] = useState('')
   const [newFieldLabel, setNewFieldLabel] = useState('')
@@ -7500,7 +7529,53 @@ function AdminView({
             </div>
           </PopupCard>
               <div style={{ height: 1, background: 'var(--separator)', margin: '0 16px' }} />
-              <PopupCard grouped title="Platoon" icon={UsersGroup} subtitle="Create, rename and reorder platoons." open={openPopup === 'groups'} onOpen={() => setOpenPopup('groups')} onClose={() => setOpenPopup(null)}>
+              {/* Companies sit ABOVE platoons in the list because they sit above them in
+                  the unit: a platoon is filed under one, so the thing it is filed under
+                  has to exist first. Same card shape as Platoon below it. */}
+              <PopupCard grouped title="Company" icon={Layers} subtitle="Create, rename and reorder companies." open={openPopup === 'companies'} onOpen={() => setOpenPopup('companies')} onClose={() => setOpenPopup(null)}>
+            <div style={{ marginBottom: 10 }}>
+              <ReorderList items={companies} onReorder={setCompanyOrder} ghostLabel={(c) => c.name}
+                rowPadding="10px 8px" itemGap={4} handlePadding={0}
+                renderRow={(c, dragHandle) => (
+                  editingCompanyId === c.id ? (
+                    <>
+                      <input autoFocus value={editingCompanyName} onChange={(e) => setEditingCompanyName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && renameDirty(editingCompanyName, c.name)) { renameCompany(c.id, editingCompanyName); setEditingCompanyId(null) }
+                          if (e.key === 'Escape') setEditingCompanyId(null)
+                        }}
+                        style={{ flex: 1, marginRight: 10 }} />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                        <button onClick={() => { renameCompany(c.id, editingCompanyName); setEditingCompanyId(null) }} disabled={!renameDirty(editingCompanyName, c.name)} aria-label="Save" style={renameTick(renameDirty(editingCompanyName, c.name))}><Check size={16} /></button>
+                        <button onClick={() => setEditingCompanyId(null)} aria-label="Cancel" style={renameCross(renameChanged(editingCompanyName, c.name))}><X size={16} /></button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      {dragHandle && <button aria-label="Drag to reorder" {...dragHandle}><GripVertical size={16} /></button>}
+                      <span style={{ flex: 1, minWidth: 0, transform: 'translateY(-1px)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
+                      {/* How many platoons are filed here. Deleting a company leaves them
+                          unfiled rather than moving them, so the count is what says how
+                          much a delete would strand. */}
+                      <span style={{ fontSize: 11, color: 'var(--text-secondary)', flexShrink: 0 }}>{groups.filter((g) => (g.companyId || '') === c.id).length} PL</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                        <button onClick={() => { setEditingCompanyId(c.id); setEditingCompanyName(c.name) }} aria-label="Edit" style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', display: 'flex' }}><Pencil size={16} /></button>
+                        <button onClick={() => requestConfirm(`coy:${c.id}`, () => removeCompany(c.id))} style={{ background: 'none', border: 'none', color: confirmId === `coy:${c.id}` ? 'var(--red)' : 'var(--text-secondary)', fontSize: 12 }}>
+                          {confirmId === `coy:${c.id}` ? 'Confirm' : <Trash2 size={16} />}
+                        </button>
+                      </div>
+                    </>
+                  )
+                )} />
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input placeholder="Company Name" value={newCompanyName} onChange={(e) => setNewCompanyName(e.target.value)} style={{ flex: 1 }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { addCompany(newCompanyName); setNewCompanyName('') } }} />
+              <button className="btn-secondary" style={{ background: 'var(--blue)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: newCompanyName.trim() ? 1 : 0.4 }} onClick={() => { addCompany(newCompanyName); setNewCompanyName('') }}><Plus size={16} /></button>
+            </div>
+          </PopupCard>
+              <div style={{ height: 1, background: 'var(--separator)', margin: '0 16px' }} />
+              <PopupCard grouped title="Platoon" icon={UsersGroup} subtitle="Create, rename and file platoons under a company." open={openPopup === 'groups'} onOpen={() => setOpenPopup('groups')} onClose={() => setOpenPopup(null)}>
             <div style={{ marginBottom: 10 }}>
               <ReorderList items={groups} onReorder={setGroupOrder} ghostLabel={(g) => g.name}
                 rowPadding="10px 8px" itemGap={4} handlePadding={0}
@@ -7526,6 +7601,16 @@ function AdminView({
                     <>
                       {dragHandle && <button aria-label="Drag to reorder" {...dragHandle}><GripVertical size={16} /></button>}
                       <span style={{ flex: 1, minWidth: 0, transform: 'translateY(-1px)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.name}</span>
+                      {/* Which company this platoon belongs to, on the row rather than
+                          behind an edit: it is the one thing about a platoon that is set
+                          once and then looked at, and a select is the whole interaction.
+                          Changing it moves every man in the platoon with it — see
+                          setGroupCompany, which rewrites their flat companyId too. */}
+                      <select className="select-arrow" value={g.companyId || ''} onChange={(e) => setGroupCompany(g.id, e.target.value)}
+                        style={{ flexShrink: 0, width: 'auto', maxWidth: 120, fontSize: 12, padding: '4px 22px 4px 8px', color: g.companyId ? 'var(--text)' : 'var(--text-secondary)' }}>
+                        <option value="">No Company</option>
+                        {companies.map((c) => <option key={c.id} value={c.id} style={{ color: 'var(--text)' }}>{c.name}</option>)}
+                      </select>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                         <button onClick={() => { setEditingGroupId(g.id); setEditingGroupName(g.name) }} aria-label="Edit" style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', display: 'flex' }}>
                           <Pencil size={16} />
