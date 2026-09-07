@@ -12,6 +12,14 @@ for (const [coll, docs] of Object.entries(seed)) {
   for (const [id, data] of Object.entries(docs)) store.set(`${coll}/${id}`, structuredClone(data))
 }
 
+// Read accounting, so a test can assert on the BILL rather than on the feel.
+// Firestore bills per document delivered: a getDoc is 1, a getDocs/query is one per
+// document returned, and a listener bills its first delivery the same way.
+const reads = { total: 0, byCollection: {} }
+const bill = (collPath, n) => { reads.total += n; reads.byCollection[collPath] = (reads.byCollection[collPath] || 0) + n }
+window.__reads = reads
+window.__resetReads = () => { reads.total = 0; reads.byCollection = {} }
+
 const listeners = new Set()
 const notify = () => listeners.forEach((fn) => { try { fn() } catch (e) { console.error('listener', e) } })
 
@@ -69,7 +77,7 @@ export async function setDoc(ref, data, opts) { writeDoc(ref.path, data, opts); 
 export async function updateDoc(ref, data) { updateDoc_(ref.path, data); notify() }
 export async function deleteDoc(ref) { store.delete(ref.path); notify() }
 export async function addDoc(coll, data) { const path = `${coll.path}/${rid()}`; writeDoc(path, data); notify(); return { id: path.split('/').pop(), path } }
-export async function getDoc(ref) { return snapOf(ref.path) }
+export async function getDoc(ref) { bill(ref.path.split('/')[0], 1); return snapOf(ref.path) }
 
 const docsIn = (collPath) => [...store.keys()]
   .filter((k) => k.startsWith(collPath + '/') && k.slice(collPath.length + 1).indexOf('/') === -1)
@@ -90,12 +98,13 @@ export const query = (coll, ...cs) => ({ type: 'query', path: coll.path, wheres:
 export async function getDocs(target) {
   const all = docsIn(target.path)
   const list = target.type === 'query' ? all.filter((s) => matches(s, target.wheres)) : all
+  bill(target.path, list.length)
   return { docs: list, empty: list.length === 0, forEach: (f) => list.forEach(f) }
 }
 
 export function onSnapshot(target, next, err) {
   const fire = () => {
-    if (target.type === 'doc') return next(snapOf(target.path))
+    if (target.type === 'doc') { bill(target.path.split('/')[0], 1); return next(snapOf(target.path)) }
     getDocs(target).then(next).catch(err || (() => {}))
   }
   fire()

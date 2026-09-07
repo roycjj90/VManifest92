@@ -240,9 +240,18 @@ service cloud.firestore {
     // (super admin spans all); admins write it (reconciled from accounts client-side).
     // Additive/zero-risk like authIndex: publish this block BEFORE deploying the client
     // that reads/writes rosters. `list` is intentionally not granted (no enumeration).
-    match /rosters/{groupId} {
-      allow get: if isSuperAdmin()
-                 || (signedIn() && myMirror().groupId == groupId);
+    // Keyed by COMPANY now, not platoon — six documents that carry every seatable
+    // person, names only, so nobody has to read 500 account documents to draw a list.
+    // Also 'ATTACHED' (the battalion-wide attached pool) and 'UNFILED' (platoons not
+    // yet under a company).
+    //
+    // An admin lists the whole collection; a member gets their own company's document
+    // and nothing else. `list` is admin-only on purpose: a member reading one company
+    // is their own unit, a member reading all six is the battalion's nominal roll.
+    match /rosters/{companyId} {
+      allow get: if isAdmin()
+                 || (signedIn() && myMirror().get('companyId', '') == companyId);
+      allow list: if isAdmin();
       allow write: if isAdmin();
     }
 

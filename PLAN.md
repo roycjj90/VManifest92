@@ -207,7 +207,7 @@ an account with no password and no `authIndex` entry. The seat already carries
 *Simplification:* the old rule "a movement status is the only way onto a vehicle"
 dies with the statuses. Attached men now seat straight off the roster.
 
-## Phase 4 — Make 500 people affordable (the important one)  ⬜
+## Phase 4 — Make 500 people affordable (the important one)  ✅ DONE
 
 **Problem:** a super admin currently subscribes to *every* account
 (`App.jsx:2200`). At 500 people that's 500 reads per app open.
@@ -222,10 +222,35 @@ rosters/ATTACHED    = same shape, att:true   // outside-unit pool
 ```
 
 = **6 reads** to load every seatable person in the battalion, not 500.
-~100 people × ~80 bytes ≈ 8 KB per doc; the limit is 1 MB. Fine.
+Measured at 500 people: **12 KB** per company document against a 1 MB limit.
 
-A full `accounts` doc is read **only** when opening one person's profile, on demand.
-The reconcile-on-change logic already exists — just key it on `companyId`.
+A full `accounts` doc is read **only** when opening one person's profile, on demand
+(`loadFullAccount`), and merged over the roster row so the rest of the list stays cheap.
+
+**Rosters are written at mutation time, not reconciled from a full read** — the whole
+point is that nobody holds all 500 accounts to reconcile from. Every mutation that
+changes what a list shows writes its row: create, remove, platoon move, section move,
+rename, nickname, role, reorder, rank, and a platoon changing company (which moves
+every man in it to a different roster *document*). `Admin → Rebuild Rosters` repairs
+drift by reading every account once — deliberate, manual, never automatic.
+
+`users/{uid}` gains `companyId`, because `firestore.rules` reads it to decide which
+company roster a member may fetch. Rules use `.get('companyId', '')` so a mirror
+written before this existed does not raise and deny.
+
+**Measured with the harness at 500 people, 5 companies, 20 platoons:**
+
+| | reads |
+|---|---|
+| Admin opens the app | **40** (was 500+) |
+| Member opens the app | **33** |
+| Browsing platoons / companies | **0** |
+| Searching all 500 names | **0** |
+| A rider seeing their seat | **1** |
+
+The 40 breaks down as 20 platoon docs + 6 rosters + 5 companies + 3 account fields +
+own account, session and lockdown. **The platoon list is now the biggest single cost**
+— denormalising it the way the rosters were is the obvious next saving if it matters.
 
 **Checked:** manifest doc size is fine. A 500-seat battalion move is ~60 KB against
 the 1 MB limit. No need to split manifests across docs.

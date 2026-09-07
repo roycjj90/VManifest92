@@ -1629,6 +1629,64 @@ function memberOrderKey(a) {
   return typeof a?.memberOrder === 'number' ? a.memberOrder : 0
 }
 
+// ---- Company rosters --------------------------------------------------------
+// The one thing that makes 500 people affordable.
+//
+// A super admin used to subscribe to the whole `accounts` collection: 500 documents
+// on every app open. Twenty admins opening the app five times a day is 50,000 reads —
+// the entire free daily allowance, spent before anybody does anything.
+//
+// Instead every seatable person is mirrored, names-only, into one document per company
+// plus one for the battalion-wide attached pool. Six documents. ~100 people at ~80
+// bytes is ~8KB against a 1MB limit, so a company fits many times over.
+//
+// A FULL account document is read only when one person's profile is opened, on demand.
+// Everything a list or the seating screen needs is here instead.
+const ROSTER_ATTACHED = 'ATTACHED'
+// Platoons not yet filed under a company still have to live somewhere, or their people
+// vanish from the picker with nothing to say why.
+const ROSTER_UNFILED = 'UNFILED'
+const rosterDocIdOf = (a) => (a && a.attached ? ROSTER_ATTACHED : ((a && a.companyId) || ROSTER_UNFILED))
+
+// Short keys: this map is the whole document and it is read on every app open, so the
+// difference between `groupId` and `g` is real money at 500 people.
+function rosterEntryOf(a) {
+  return {
+    n: memberLabel(a),
+    dn: a.displayName || '',
+    g: a.groupId || '',
+    c: a.companyId || '',
+    mg: a.miniGroupId || '',
+    o: memberOrderKey(a),
+    ...(a.info && a.info.Rank ? { rk: a.info.Rank } : null),
+    ...(a.attached ? { att: true } : null),
+    ...(a.isAdmin ? { adm: true } : null),
+    ...(a.deferredFrom ? { df: a.deferredFrom } : null),
+  }
+}
+
+// Back into the shape every screen already expects, so nothing downstream has to know
+// where its list came from. `nickname` carries the resolved label because memberLabel
+// prefers it; `displayName` stays the roll name the printed manifest needs.
+function personFromRoster(id, e) {
+  return {
+    id,
+    nickname: e.n || '',
+    displayName: e.dn || e.n || '',
+    groupId: e.g || '',
+    companyId: e.c || '',
+    miniGroupId: e.mg || '',
+    memberOrder: e.o || 0,
+    ...(e.rk ? { info: { Rank: e.rk } } : null),
+    ...(e.att ? { attached: true } : null),
+    ...(e.adm ? { isAdmin: true } : null),
+    ...(e.df ? { deferredFrom: e.df } : null),
+    // Marks a row that came from the mirror rather than from a full document, so
+    // anything needing a real field (a username, a lockout) knows to fetch first.
+    fromRoster: true,
+  }
+}
+
 // Sort a member list by manual order, tie-broken alphabetically by label.
 function orderedMembers(list) {
   return [...list].sort((a, b) => (memberOrderKey(a) - memberOrderKey(b)) || memberLabel(a).localeCompare(memberLabel(b)))
@@ -1738,9 +1796,13 @@ async function writeIdentityDocs(accountId, uid, version, uname) {
   const snap = await getDoc(doc(db, 'accounts', accountId))
   if (!snap.exists()) return
   const acc = snap.data()
+  // companyId joins the mirror because firestore.rules reads it to decide which
+  // company roster this person may fetch. Rules string-match this shape — change one,
+  // change both.
   await setDoc(doc(db, 'users', uid), {
     accountId,
     groupId: acc.groupId || '',
+    companyId: acc.companyId || '',
     isAdmin: !!acc.isAdmin,
     isSuperAdmin: !!acc.isSuperAdmin,
   }, { merge: true })
@@ -1815,7 +1877,23 @@ export default function App() {
       return localStorage.getItem(`vmanifest92_theme_${id}`) || 'system'
     } catch (e) { return 'system' }
   })
-  const [accounts, setAccounts] = useState([])
+  // A member's own document, and only that. An admin's people come from the rosters
+  // below instead — see `accounts`, which is what every screen actually reads.
+  const [ownAccounts, setOwnAccounts] = useState([])
+  // The company rosters, hydrated into account-shaped rows. Admin only.
+  const [rosterPeople, setRosterPeople] = useState([])
+  // Full account documents fetched on demand — one per profile actually opened.
+  // Keyed by id and merged OVER the roster row, so a screen that has fetched a
+  // person sees every field and one that has not still sees a usable row.
+  const [fullAccounts, setFullAccounts] = useState({})
+
+  // THE list every screen reads. One name, two sources: an admin's rows come from the
+  // six company rosters, a member's from their own document. A full account fetched on
+  // demand is merged over its roster row, so a profile that has been opened shows every
+  // field while the rest of the list stays on the cheap mirror.
+  const accounts = account?.isAdmin
+    ? rosterPeople.map((p) => (fullAccounts[p.id] ? { ...p, ...fullAccounts[p.id] } : p))
+    : ownAccounts
   const [groups, setGroups] = useState([])
   const [companies, setCompanies] = useState([])
   const [attendance, setAttendance] = useState({})
@@ -2199,16 +2277,26 @@ export default function App() {
   useEffect(() => {
     if (!account) return
     const sort = (arr) => arr.sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-    const unsubs = [
-      onSnapshot(
-        account.isSuperAdmin
-          ? collection(db, 'accounts')
-          : account.isAdmin
-            ? query(collection(db, 'accounts'), where('groupId', '==', account.groupId))
-            : query(collection(db, 'accounts'), where('__name__', '==', account.id)),
-        (snap) => setAccounts(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
-      ),
-    ]
+    const unsubs = []
+    if (account.isAdmin) {
+      // SIX documents, not five hundred. See the roster helpers at the top of this
+      // file for why. A full account is fetched on demand when a profile is opened.
+      unsubs.push(onSnapshot(collection(db, 'rosters'), (snap) => {
+        const list = []
+        snap.docs.forEach((d) => {
+          const members = d.data().members || {}
+          Object.entries(members).forEach(([id, e]) => list.push(personFromRoster(id, e)))
+        })
+        setRosterPeople(list)
+      }, () => {}))
+    } else {
+      // A member holds their own document and nothing else — one read, and the only
+      // account row any of their screens asks about.
+      unsubs.push(onSnapshot(
+        query(collection(db, 'accounts'), where('__name__', '==', account.id)),
+        (snap) => setOwnAccounts(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      ))
+    }
 
     // Everyone listens, because turning lockdown on signs everyone else out on
     // the spot — that can't work off a listener only super admins hold. One
@@ -2383,35 +2471,80 @@ export default function App() {
   }, [movements, mySeats, mvKind, account])
 
 
-  // Admins keep the names-only rosters/{groupId} mirror in sync from the accounts
-  // they can see (basic admin → own group; super admin → all groups). Reconciled
-  // here rather than in each mutation so create/remove/rename/move/role all flow
-  // through one path. A per-group JSON guard means it only writes when the member
-  // map actually changed — ~0 writes steady-state.
-  useEffect(() => {
-    if (!account?.isAdmin) return
-    const scope = account.isSuperAdmin ? groups.map((g) => g.id) : (account.groupId ? [account.groupId] : [])
-    scope.forEach((gid) => {
-      if (!gid) return
-      const members = {}
-      // Deferred personnel come off the roster members see. This has no date to
-      // reason about — it's the list as it stands — so it asks about today.
-      accounts.filter((a) => (a.groupId || '') === gid && activeOn(a, todayISO())).forEach((a) => {
-        members[a.id] = { label: memberLabel(a), mg: a.miniGroupId || '', order: memberOrderKey(a) }
+  // The rosters are written AT MUTATION TIME, not reconciled from a full read — the
+  // whole point of them is that nobody holds all 500 accounts to reconcile from.
+  //
+  // `prevRosterDoc` matters when a person moves company (or becomes attached): the row
+  // has to be deleted from the roster it is leaving, or he shows up in two companies.
+  // One or two writes per personnel change, against 500 reads per app open saved.
+  async function writeRosterFor(next, prevRosterDoc) {
+    if (!next || !next.id) return
+    const here = rosterDocIdOf(next)
+    try {
+      const batch = writeBatch(db)
+      if (prevRosterDoc && prevRosterDoc !== here) {
+        batch.set(doc(db, 'rosters', prevRosterDoc), { members: { [next.id]: deleteField() } }, { merge: true })
+      }
+      batch.set(doc(db, 'rosters', here), { members: { [next.id]: rosterEntryOf(next) } }, { merge: true })
+      await batch.commit()
+    } catch (e) {}
+  }
+  // Applies a patch to the row we already hold and mirrors the result. The caller has
+  // just written the same patch to the account document, so this keeps the two in step
+  // without reading the account back.
+  async function touchRoster(id, patch) {
+    const cur = accounts.find((a) => a.id === id)
+    if (!cur) return
+    await writeRosterFor({ ...cur, ...patch }, rosterDocIdOf(cur))
+  }
+  async function dropFromRoster(id) {
+    const cur = accounts.find((a) => a.id === id)
+    if (!cur) return
+    try { await setDoc(doc(db, 'rosters', rosterDocIdOf(cur)), { members: { [id]: deleteField() } }, { merge: true }) } catch (e) {}
+  }
+
+  // The full account behind a roster row, read once and kept. This is the ONLY place a
+  // whole account document is read for somebody else, and it happens when an admin
+  // opens one person's profile — one read, for one person, on purpose.
+  async function loadFullAccount(id) {
+    if (!id || fullAccounts[id]) return
+    try {
+      const snap = await getDoc(doc(db, 'accounts', id))
+      if (snap.exists()) setFullAccounts((prev) => ({ ...prev, [id]: { id: snap.id, ...snap.data() } }))
+    } catch (e) {}
+  }
+
+  // Repair. The mirror is written by the app, so a botched import or a write that lost a
+  // race can leave it disagreeing with the accounts collection — and nothing else reads
+  // the accounts collection any more, so nothing else would ever notice. Costs one read
+  // per account, which is exactly what the rosters exist to avoid, so it is a button an
+  // admin presses and never anything automatic.
+  async function rebuildRosters() {
+    try {
+      const snap = await getDocs(collection(db, 'accounts'))
+      const byDoc = {}
+      snap.docs.forEach((d) => {
+        const a = { id: d.id, ...d.data() }
+        const key = rosterDocIdOf(a)
+        ;(byDoc[key] = byDoc[key] || {})[d.id] = rosterEntryOf(a)
       })
-      const json = JSON.stringify(members)
-      if (rosterSyncRef.current[gid] === json) return
-      rosterSyncRef.current[gid] = json
-      setDoc(doc(db, 'rosters', gid), { members }, { merge: false }).catch(() => {})
-    })
-  }, [accounts, account, groups])
+      const keys = new Set([...Object.keys(byDoc), ROSTER_ATTACHED, ROSTER_UNFILED, ...companies.map((c) => c.id)])
+      const batch = writeBatch(db)
+      // merge:false, so a person deleted straight out of the console does not linger.
+      keys.forEach((k) => batch.set(doc(db, 'rosters', k), { members: byDoc[k] || {} }, { merge: false }))
+      await batch.commit()
+      return { ok: true, message: `Rebuilt ${keys.size} rosters from ${snap.size} accounts.` }
+    } catch (e) {
+      return { ok: false, message: "Couldn't rebuild rosters." }
+    }
+  }
 
   // Regular users read their own group's roster (names only). getDoc + 1h cache
   // (like the static cache) keeps this to ~1 read per session; pull-to-refresh
   // forces a fresh read.
   async function loadRoster(force) {
-    if (!account || account.isAdmin || !account.groupId) { setRoster(null); return }
-    const ckey = `vmanifest92_roster_${account.groupId}`
+    if (!account || account.isAdmin || !account.companyId) { setRoster(null); return }
+    const ckey = `vmanifest92_roster_${account.companyId}`
     if (!force) {
       try {
         const raw = localStorage.getItem(ckey)
@@ -2422,7 +2555,7 @@ export default function App() {
       } catch (e) {}
     }
     try {
-      const snap = await getDoc(doc(db, 'rosters', account.groupId))
+      const snap = await getDoc(doc(db, 'rosters', account.companyId))
       const members = snap.exists() ? (snap.data().members || {}) : {}
       setRoster(members)
       try { localStorage.setItem(ckey, JSON.stringify({ members, ts: Date.now() })) } catch (e) {}
@@ -3118,7 +3251,12 @@ export default function App() {
   }
 
   async function setAccountInfo(accountId, info) {
-    try { await setDoc(doc(db, 'accounts', accountId), { info }, { merge: true }); return true } catch (e) { return false }
+    try {
+      await setDoc(doc(db, 'accounts', accountId), { info }, { merge: true })
+      // Rank is the one info field the roster carries, because the lists print it.
+      await touchRoster(accountId, { info })
+      return true
+    } catch (e) { return false }
   }
   async function addAccountField(label) {
     if (!label || !label.trim()) return
@@ -3227,6 +3365,13 @@ export default function App() {
     // this is the whole mechanism, not a cosmetic flag.
     if (!attached) batch.set(doc(db, 'authIndex', uname), { accountId: accountRef.id, authEmailVersion: 0, password: hash, failedAttempts: 0, lockedUntil: null, authEmailScheme: AUTH_SCHEME_ACCOUNT })
     await batch.commit()
+    // Into the mirror, or the new person is invisible to every screen — nothing reads
+    // the accounts collection to find them any more.
+    await writeRosterFor({
+      id: accountRef.id, displayName: displayName.trim(), nickname: (nickname || '').trim(),
+      groupId: groupId || '', companyId: companyOf(groupId), miniGroupId: miniGroupId || '',
+      attached: !!attached, isAdmin: role === 'admin' || role === 'superAdmin',
+    })
     return { ok: true }
   }
 
@@ -3246,6 +3391,7 @@ export default function App() {
         isSuperAdmin: role === 'superAdmin',
       }, { merge: true })
       await syncUserClaims(id, { isAdmin: role === 'admin' || role === 'superAdmin', isSuperAdmin: role === 'superAdmin' })
+      await touchRoster(id, { isAdmin: role === 'admin' || role === 'superAdmin' })
       return true
     } catch (e) { return false }
   }
@@ -3267,6 +3413,7 @@ export default function App() {
       const name = (acc && (acc.displayName || acc.username)) || ''
       if (name) batch.set(doc(db, 'formerMembers', 'index'), { [id]: name }, { merge: true })
       await batch.commit()
+      await dropFromRoster(id)
       setFormerNames((prev) => (name ? { ...prev, [id]: name } : prev))
     } catch (e) {}
   }
@@ -3285,6 +3432,7 @@ export default function App() {
   // write is only for an account with no group, which owns no attendance row.
   async function returnToPlatoon(id) {
     try { await setDoc(doc(db, 'accounts', id), { deferredFrom: deleteField(), deferredPrev: deleteField() }, { merge: true }) } catch (e) {}
+    await touchRoster(id, { deferredFrom: '' })
   }
 
   // Shared tail of a self-service password change: try syncing Firebase Auth
@@ -3407,6 +3555,7 @@ export default function App() {
     if (!trimmed) return { ok: false, message: 'Enter a display name.' }
     try {
       await setDoc(doc(db, 'accounts', id), { displayName: trimmed }, { merge: true })
+      await touchRoster(id, { displayName: trimmed })
       if (id === account.id) setAccount({ ...account, displayName: trimmed })
       return { ok: true }
     } catch (e) {
@@ -3418,6 +3567,7 @@ export default function App() {
     const trimmed = (nickname || '').trim()
     try {
       await setDoc(doc(db, 'accounts', id), { nickname: trimmed }, { merge: true })
+      await touchRoster(id, { nickname: trimmed })
       if (id === account.id) setAccount({ ...account, nickname: trimmed })
       return { ok: true }
     } catch (e) {
@@ -3545,9 +3695,16 @@ export default function App() {
   async function setGroupCompany(groupId, companyId) {
     const batch = writeBatch(db)
     batch.set(doc(db, 'groups', groupId), { companyId: companyId || '' }, { merge: true })
-    accounts.filter((a) => (a.groupId || '') === groupId)
-      .forEach((a) => batch.set(doc(db, 'accounts', a.id), { companyId: companyId || '' }, { merge: true }))
+    // The mirror decides which company roster each of these people may read, so it has
+    // to move with them or they lose their own roster the moment the platoon is re-filed.
+    const moving = accounts.filter((a) => (a.groupId || '') === groupId)
+    moving.forEach((a) => batch.set(doc(db, 'accounts', a.id), { companyId: companyId || '' }, { merge: true }))
     try { await batch.commit() } catch (e) {}
+    // Every one of them changes roster DOCUMENT, not just a field in it.
+    for (const a of moving) {
+      await writeRosterFor({ ...a, companyId: companyId || '' }, rosterDocIdOf(a))
+      await syncUserClaims(a.id, { companyId: companyId || '' })
+    }
   }
 
   async function addGroup(name) {
@@ -3606,7 +3763,11 @@ export default function App() {
         ? { groupId: to, companyId: companyOf(to), miniGroupId: '', prevGroupId: from, groupChangedOn: todayISO() }
         : { groupId: to, companyId: companyOf(to), miniGroupId: '' }, { merge: true })
     } catch (e) {}
-    await syncUserClaims(id, { groupId: to })
+    await syncUserClaims(id, { groupId: to, companyId: companyOf(to) })
+    // Platoon, section and company all change here, and the company decides WHICH
+    // roster document the row belongs in — so this is the move that can strand a row
+    // in the company he left.
+    await touchRoster(id, { groupId: to, companyId: companyOf(to), miniGroupId: '' })
   }
 
   // Mini-groups (a member subdivision inside a group) live as an embedded array on
@@ -3648,6 +3809,7 @@ export default function App() {
     const from = before ? (before.miniGroupId || '') : ''
     const to = miniGroupId || ''
     try { await setDoc(doc(db, 'accounts', id), { miniGroupId: to }, { merge: true }) } catch (e) {}
+    await touchRoster(id, { miniGroupId: to })
   }
 
   // Reorder a member within its (group, mini-group) bucket. Persists a normalized
@@ -3663,11 +3825,10 @@ export default function App() {
     const swapIdx = idx + direction
     if (idx === -1 || swapIdx < 0 || swapIdx >= peers.length) return
     ;[peers[idx], peers[swapIdx]] = [peers[swapIdx], peers[idx]]
-    await Promise.all(
-      peers
-        .map((a, i) => (a.memberOrder === i ? null : setDoc(doc(db, 'accounts', a.id), { memberOrder: i }, { merge: true })))
-        .filter(Boolean)
-    ).catch(() => {})
+    const moved = peers.map((a, i) => (a.memberOrder === i ? null : [a, i])).filter(Boolean)
+    await Promise.all(moved.map(([a, i]) => setDoc(doc(db, 'accounts', a.id), { memberOrder: i }, { merge: true }))).catch(() => {})
+    // The order is what the list is drawn in, so the mirror has to carry it too.
+    await Promise.all(moved.map(([a, i]) => writeRosterFor({ ...a, memberOrder: i }, rosterDocIdOf(a)))).catch(() => {})
   }
 
   // requiresDoc/docLabel travel together: the name is only meaningful while the
@@ -4279,6 +4440,7 @@ export default function App() {
             groupFields={groupFields} addGroupField={addGroupField} removeGroupField={removeGroupField} reorderGroupField={reorderGroupField} setGroupFieldOrder={setGroupFieldOrder} renameGroupField={renameGroupField}
             accountFields={accountFields} addAccountField={addAccountField} removeAccountField={removeAccountField} reorderAccountField={reorderAccountField} setAccountFieldOrder={setAccountFieldOrder} renameAccountField={renameAccountField} setAccountFieldEditable={setAccountFieldEditable} setAccountInfo={setAccountInfo} setAccountRole={setAccountRole}
             adminSubTab={sub} setAdminSubTab={live ? setAdminSubTab : SWIPE_NOOP}
+            rebuildRosters={rebuildRosters} loadFullAccount={loadFullAccount}
           />
           )
           return (
@@ -7044,7 +7206,7 @@ function AdminView({
   setGroupInfo,
   groupFields, addGroupField, removeGroupField, reorderGroupField, setGroupFieldOrder, renameGroupField,
   accountFields, addAccountField, removeAccountField, reorderAccountField, setAccountFieldOrder, renameAccountField, setAccountFieldEditable, setAccountInfo, setAccountRole,
-  adminSubTab, setAdminSubTab,
+  adminSubTab, setAdminSubTab, rebuildRosters, loadFullAccount,
 }) {
   const [openPopup, setOpenPopup] = useState(null)
   // Tells App when Device Lockouts is on screen, which is the only moment their listener
@@ -7150,6 +7312,8 @@ function AdminView({
   // work" is exactly the question the held-back line above it already answers. The tap
   // turns that line red instead.
   const [mvDenied, setMvDenied] = useState(false)
+  const [rebuildMsg, setRebuildMsg] = useState('')
+  const [rebuildBusy, setRebuildBusy] = useState(false)
   const confirmTimer = useRef(null)
   const adminSectionHeaderStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', margin: '0 0 8px' }
   const todaysLocks = Object.entries(deviceLogins).filter(([, lock]) => lock.date === todayISO())
@@ -7196,6 +7360,10 @@ function AdminView({
 
 
   function openAccountPopup(a) {
+    // The row on the list came from the company roster and carries names only. Everything
+    // this panel edits — login ID, password state, lockouts — lives on the account
+    // document, so fetch it now. One read, for one person, because somebody asked.
+    if (a && a.fromRoster) loadFullAccount(a.id)
     setPopupAccount(a)
     setEditPw('')
     setPanelMsg('')
@@ -7759,6 +7927,24 @@ function AdminView({
                   sits above: it is a live switch rather than a clean-up, and a mode
                   change that takes one tap does not belong in the same box as two
                   irreversible deletions. */}
+              {/* Repair for the company rosters. They are the only thing any screen
+                  reads to draw a list, and they are written by the app — so a botched
+                  import or a write that lost a race leaves a list disagreeing with the
+                  accounts behind it, and nothing else would ever notice.
+                  Costs one read per account, which is the whole thing the rosters exist
+                  to avoid, so it is a button and never anything automatic. */}
+              <PopupCard grouped title="Rebuild Rosters" icon={RefreshCw} subtitle="Repair personnel lists from the accounts."
+                open={openPopup === 'rebuild'} onOpen={() => { setRebuildMsg(''); setOpenPopup('rebuild') }} onClose={() => setOpenPopup(null)}>
+                <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: '0 0 12px', lineHeight: 1.5 }}>
+                  Personnel lists are kept as a summary so the app doesn't read every account each time it opens. Rebuild it if a name, platoon or company looks wrong.
+                </p>
+                <button className="btn-primary" style={{ width: '100%' }} disabled={rebuildBusy}
+                  onClick={async () => { setRebuildBusy(true); const r = await rebuildRosters(); setRebuildMsg(r.message); setRebuildBusy(false) }}>
+                  {rebuildBusy ? 'Rebuilding…' : 'Rebuild Rosters'}
+                </button>
+                {rebuildMsg && <p style={{ fontSize: 12, marginTop: 8, color: rebuildMsg.startsWith('Rebuilt') ? 'var(--blue)' : 'var(--red)' }}>{rebuildMsg}</p>}
+              </PopupCard>
+              <div style={{ height: 1, background: 'var(--separator)', margin: '0 16px' }} />
               <PopupCard grouped title="Clear Manifests" icon={Archive} subtitle="Clear out past vehicle manifests." maxHeight="70vh"
                 open={openPopup === 'purgeArchive'}
                 onOpen={() => {
