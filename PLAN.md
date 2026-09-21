@@ -21,6 +21,25 @@ Minimise Firestore reads in every design *and* while testing.
 
 ---
 
+## Status: all six phases complete
+
+Built, tested and live at `v-manifest92.vercel.app`, on the free tier throughout.
+`src/App.jsx` 17,054 → ~8,400 lines. Hardened rules published; App Check enforced.
+
+**Still open before real personnel go in:**
+
+1. **Change the seeded `admin` password** from `123`. The single biggest remaining
+   item — bigger than App Check was, because the dev quick-login buttons are staying.
+2. **Keep Lockdown Mode on** until the app is actually announced.
+3. **Confirm the Console rules match `firestore.rules`.** On 2026-09-21, minutes before
+   App Check enforcement took effect, an unauthenticated read of `companies` succeeded
+   while `accounts` was correctly refused — which the repo's rules would not allow. Low
+   severity (company names), but it means the two can drift.
+4. **Import the real 500** via Admin → Import Personnel, then **Admin → Rebuild
+   Rosters** if anything looks wrong.
+
+---
+
 ## Why extract, not rebuild
 
 The manifest in PULSE 92 was already written as a *plan*, not a record
@@ -285,7 +304,7 @@ because it is one company. 5 companies need many.
 - **Keep** the manifest report / export (`buildManifestReport`, `App.jsx:13356`).
   That is the printed sheet, and it is the whole point of the app.
 
-## Phase 6 — Rules, seed, lock down  🔶 IN PROGRESS
+## Phase 6 — Rules, seed, lock down  ✅ DONE
 
 1. **Done.** `firestore.rules` 628 → 367 lines: blocks for every dropped collection
    deleted, `companies` added, `seats` and `rosters` re-keyed. No company-admin level
@@ -334,9 +353,16 @@ because it is one company. 5 companies need many.
      enforcing in the console while the deployed build has no site key looks exactly
      like a rules mistake, and the fix is somewhere else entirely.
 
-   Order on the day: register reCAPTCHA v3 → set the key in Vercel → **redeploy** →
-   confirm the login screen says `App Check: on` and tokens appear in the console →
-   leave it a day → **then** enforce.
+   **Done and ENFORCED (2026-09-21).** reCAPTCHA v3 was still offered as an App Check
+   provider, so no reCAPTCHA Enterprise and no billing account was needed. Free v3 key
+   from google.com/recaptcha/admin, domain `v-manifest92.vercel.app`; secret key into
+   the Firebase console, site key into Vercel as `VITE_RECAPTCHA_SITE_KEY`, redeploy,
+   enforce.
+
+   Confirmed working: every unauthenticated REST request to the database is now
+   refused — including `authIndex` and `appAccess/lockdown`, which the rules
+   deliberately leave open, because App Check rejects a tokenless request before the
+   rules are consulted — while the real app logs in normally.
 
    Note: once enforced, Firestore refuses plain REST calls that carry only an API key.
    That is the point, but it also ends the console-free database checks used
