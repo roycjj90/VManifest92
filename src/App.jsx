@@ -1297,7 +1297,24 @@ async function loginWithCredentials(username, password, deviceId, opts = {}) {
 
     return { ok: true, account: acc, sessionToken }
   } catch (e) {
-    return { ok: false, message: 'Could not reach the database. Check your Firebase setup.' }
+    // The CODE, not a shrug. This catch swallowed every distinct failure into one
+    // sentence — App Check refusing a tokenless request, a rules denial, and a dead
+    // network all read identically, and the fix for each is somewhere different.
+    //
+    // App Check is called out by name because it is the one nobody guesses: the login
+    // bootstrap reads authIndex BEFORE any Firebase Auth session exists, so with App
+    // Check enforced that read is refused unless reCAPTCHA has already produced a
+    // token — and if reCAPTCHA itself is blocked (an ad blocker, a strict network),
+    // it never will.
+    console.error('VManifest 92 login error:', e)
+    const code = (e && e.code) || ''
+    const denied = code === 'permission-denied' || code === 'unauthenticated'
+    return {
+      ok: false,
+      message: denied
+        ? `Sign-in refused (${code}). If App Check is enforced, this device may not be getting a reCAPTCHA token — an ad blocker or a strict network will do that.`
+        : `Could not reach the database${code ? ` (${code})` : ''}. Check your Firebase setup.`,
+    }
   }
 }
 
