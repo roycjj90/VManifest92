@@ -8062,6 +8062,19 @@ function AdminView({
 
           <div>
             <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', textTransform: 'uppercase', margin: '0 0 8px' }}>System</p>
+            {/* Whether this BUILD is sending App Check tokens. Enforcing App Check while
+                the deployed build has no site key refuses every request with a bare
+                permission-denied, and nothing on screen says which of the two is wrong —
+                the console shows 0 verified requests and that is all you get.
+                One line, read straight off the build, settles it. */}
+            <div className="card" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+              <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>App Check</span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: import.meta.env.VITE_RECAPTCHA_SITE_KEY ? 'var(--blue)' : 'var(--text-secondary)' }}>
+                {import.meta.env.VITE_RECAPTCHA_SITE_KEY
+                  ? `sending tokens · key …${String(import.meta.env.VITE_RECAPTCHA_SITE_KEY).slice(-6)}`
+                  : 'NO KEY IN THIS BUILD — do not enforce'}
+              </span>
+            </div>
             <div className="card" style={{ padding: 0 }}>
               {/* First in the card. Lockdown is the one entry here that changes the app
                   for everyone the moment it is tapped; the rest are settings and clean-up
