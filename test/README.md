@@ -56,3 +56,19 @@ rider cannot write their own seat, make themselves an admin, or move themselves 
 another platoon; manifests are admin-only; a rider gets their own company's roster but
 cannot list all six; the login lookup works before sign-in but cannot be enumerated;
 and every dropped collection is shut to everyone.
+
+## Sample data and the end-to-end pass
+
+`sample-250.tsv` is 250 synthetic personnel across 5 companies, 12 platoons and 36
+sections — realistic ranks, Singaporean names, phone-shaped login IDs. Paste it into
+**Admin → Import Personnel**.
+
+**52 of the 250 names repeat.** That is deliberate and realistic: real units have two
+men with the same name. It also means a test that searches by name must pick one that
+occurs exactly once, or it finds the wrong man — `move.test.mjs` does that with its
+`uniq()` helper, after three runs where the app was right and the test was wrong.
+
+`move.test.mjs` drives a whole move against a fresh install: seed, import 250, type in
+the first vehicle, seat a driver (checking a non-driver is refused the role), seat
+troops from two companies by search, confirm a draft writes no seats, publish, then log
+in as one of the imported riders with the real login form and check what they see.
