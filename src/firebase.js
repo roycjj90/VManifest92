@@ -1,7 +1,7 @@
 import { initializeApp } from 'firebase/app'
 import { getFirestore } from 'firebase/firestore'
 import { getAuth } from 'firebase/auth'
-import { initializeAppCheck, ReCaptchaV3Provider } from 'firebase/app-check'
+import { initializeAppCheck, ReCaptchaV3Provider, getToken } from 'firebase/app-check'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -26,19 +26,45 @@ const RECAPTCHA_SITE_KEY = import.meta.env.VITE_RECAPTCHA_SITE_KEY
 // refused by Firestore with a bare permission-denied, which is indistinguishable
 // from a rules problem unless something says so.
 export const appCheckOn = !!RECAPTCHA_SITE_KEY
+
+// Whether reCAPTCHA has actually HANDED US a token — a different question from
+// whether a site key is present, and the only one that predicts what happens when
+// App Check is enforced. A key can be in the build and still yield nothing:
+// reCAPTCHA blocked by an extension, a domain that does not match the key, or a key
+// that is simply wrong for this registration. Firebase's console then shows 0
+// verified requests and says nothing about which.
+//
+// Mutable, read by the Admin screen a moment later, because the answer only exists
+// after an async round trip to Google.
+export const appCheckState = { status: RECAPTCHA_SITE_KEY ? 'checking' : 'no-key', detail: '' }
+
 if (RECAPTCHA_SITE_KEY) {
   // For local dev / automated testing against an ENFORCED project, set a debug
   // token (App Check console → Manage debug tokens). Never set this in prod.
   const debugToken = import.meta.env.VITE_APPCHECK_DEBUG_TOKEN
   if (debugToken) self.FIREBASE_APPCHECK_DEBUG_TOKEN = debugToken
   try {
-    initializeAppCheck(app, {
+    const ac = initializeAppCheck(app, {
       provider: new ReCaptchaV3Provider(RECAPTCHA_SITE_KEY),
       isTokenAutoRefreshEnabled: true,
     })
+    // Ask for a token straight away and record the outcome. This is the check that
+    // should happen BEFORE enforcing, not after being locked out by it.
+    getToken(ac, false)
+      .then((r) => {
+        appCheckState.status = r && r.token ? 'ok' : 'empty'
+        appCheckState.detail = r && r.token ? `token ${r.token.length} chars` : 'no token returned'
+      })
+      .catch((e) => {
+        appCheckState.status = 'failed'
+        appCheckState.detail = (e && (e.code || e.message)) || 'unknown error'
+        console.error('App Check token failed:', e)
+      })
   } catch (e) {
     // Never let App Check init break app boot (e.g. bad key) — enforcement is
     // what protects the backend; a failed init just means no token is attached.
+    appCheckState.status = 'failed'
+    appCheckState.detail = (e && (e.code || e.message)) || 'init threw'
     console.error('App Check init failed:', e)
   }
 }

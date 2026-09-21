@@ -3,7 +3,7 @@ import { createPortal, flushSync } from 'react-dom'
 import {
   doc, getDoc, setDoc, updateDoc, deleteField, addDoc, deleteDoc, collection, onSnapshot, getDocs, query, where, writeBatch, Bytes, arrayUnion, arrayRemove,
 } from 'firebase/firestore'
-import { db, auth, appCheckOn } from './firebase.js'
+import { db, auth, appCheckOn, appCheckState } from './firebase.js'
 import { SteeringWheel, UsersGroup, Run, RunPlus, UserCog, UsersCog, DocOnDoc } from './tabler-icons.jsx'
 import { RankInsignia, rankKey, rankLabel } from './rank-icons.jsx'
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, updatePassword, updateEmail, signOut, onAuthStateChanged, reauthenticateWithCredential, EmailAuthProvider } from 'firebase/auth'
@@ -7385,6 +7385,39 @@ function PasswordInput({ value, onChange, onBlur, placeholder, autoComplete }) {
   )
 }
 
+// Reports what reCAPTCHA actually returned, not merely that a key exists. The first
+// version of this card said "sending tokens" whenever a key was present, which is a
+// different claim and would have been wrong here. The answer arrives a moment after
+// boot, so poll the module-level state until it settles rather than leave "checking…"
+// on screen forever.
+function AppCheckCard() {
+  const [st, setSt] = useState(appCheckState.status)
+  useEffect(() => {
+    if (st !== 'checking') return
+    const t = setInterval(() => {
+      if (appCheckState.status !== 'checking') {
+        setSt(appCheckState.status)
+        clearInterval(t)
+      }
+    }, 400)
+    return () => clearInterval(t)
+  }, [st])
+  const label = st === 'ok' ? 'token OK — safe to enforce'
+    : st === 'no-key' ? 'NO KEY IN THIS BUILD — do not enforce'
+    : st === 'checking' ? 'checking…'
+    : `NO TOKEN — do not enforce (${appCheckState.detail})`
+  const tint = st === 'ok' ? 'var(--blue)' : st === 'checking' ? 'var(--text-secondary)' : 'var(--red)'
+  const key = import.meta.env.VITE_RECAPTCHA_SITE_KEY
+  return (
+    <div className="card" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+      <span style={{ fontSize: 13, color: 'var(--text-secondary)', flexShrink: 0 }}>App Check</span>
+      <span style={{ fontSize: 12, fontWeight: 600, color: tint, textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' }}>
+        {label}{key ? ` · key …${String(key).slice(-6)}` : ''}
+      </span>
+    </div>
+  )
+}
+
 function AdminView({
   accounts, groups, companies, account,
   createAccount, removeAccount, returnToPlatoon, addGroup, removeGroup, renameGroup, reorderGroup, setGroupOrder, setAccountGroup,
@@ -8067,14 +8100,7 @@ function AdminView({
                 permission-denied, and nothing on screen says which of the two is wrong —
                 the console shows 0 verified requests and that is all you get.
                 One line, read straight off the build, settles it. */}
-            <div className="card" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-              <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>App Check</span>
-              <span style={{ fontSize: 12, fontWeight: 600, color: import.meta.env.VITE_RECAPTCHA_SITE_KEY ? 'var(--blue)' : 'var(--text-secondary)' }}>
-                {import.meta.env.VITE_RECAPTCHA_SITE_KEY
-                  ? `sending tokens · key …${String(import.meta.env.VITE_RECAPTCHA_SITE_KEY).slice(-6)}`
-                  : 'NO KEY IN THIS BUILD — do not enforce'}
-              </span>
-            </div>
+            <AppCheckCard />
             <div className="card" style={{ padding: 0 }}>
               {/* First in the card. Lockdown is the one entry here that changes the app
                   for everyone the moment it is tapped; the rest are settings and clean-up

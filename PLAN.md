@@ -24,7 +24,8 @@ Minimise Firestore reads in every design *and* while testing.
 ## Status: all six phases complete
 
 Built, tested and live at `v-manifest92.vercel.app`, on the free tier throughout.
-`src/App.jsx` 17,054 → ~8,400 lines. Hardened rules published; App Check enforced.
+`src/App.jsx` 17,054 → ~8,400 lines. Hardened rules published. App Check is set up but
+**currently OFF** — see item 5 below.
 
 **Still open before real personnel go in:**
 
@@ -36,7 +37,12 @@ Built, tested and live at `v-manifest92.vercel.app`, on the free tier throughout
    while `accounts` was correctly refused — which the repo's rules would not allow. Low
    severity (company names), but it means the two can drift.
 4. **Import the real 500** via Admin → Import Personnel, then **Admin → Rebuild
-   Rosters** if anything looks wrong.
+   Rosters** if anything looks wrong. 250 fake people for a dry run are in
+   `test/sample-250.tsv` — paste that into the same screen.
+5. **App Check is unenforced.** Enforcing it blocks login, and the console reports
+   **0 verified requests** even though the site key is in the deployed build. The app
+   works fine with it off; it is a locked door that is currently unlocked, not a
+   broken app. See the App Check section below for the open diagnosis.
 
 ---
 
@@ -353,16 +359,35 @@ because it is one company. 5 companies need many.
      enforcing in the console while the deployed build has no site key looks exactly
      like a rules mistake, and the fix is somewhere else entirely.
 
-   **Done and ENFORCED (2026-09-21).** reCAPTCHA v3 was still offered as an App Check
+   **Set up 2026-09-21, then turned back OFF — not working yet.** reCAPTCHA v3 was still offered as an App Check
    provider, so no reCAPTCHA Enterprise and no billing account was needed. Free v3 key
    from google.com/recaptcha/admin, domain `v-manifest92.vercel.app`; secret key into
    the Firebase console, site key into Vercel as `VITE_RECAPTCHA_SITE_KEY`, redeploy,
    enforce.
 
-   Confirmed working: every unauthenticated REST request to the database is now
+   **The problem.** With enforcement ON, login fails and the console shows **0
+   verified requests** — meaning Firebase has never once accepted a token from this
+   app. The site key IS in the deployed build (ends `bhnU2n`). Three things can cause
+   this, and nothing on screen said which:
+   - Firebase App Check is registered with reCAPTCHA **Enterprise** while the app
+     sends a reCAPTCHA **v3** token. Switching the code to the Enterprise provider
+     would likely need a billing account, which breaks the zero-cost rule.
+   - The **secret key** pasted into Firebase does not match the site key in the build.
+   - The reCAPTCHA key's **domain list** does not include `v-manifest92.vercel.app`,
+     so Google never issues a token in the first place.
+
+   **The check added for this (uncommitted, needs a deploy to be useful).**
+   `src/firebase.js` now calls `getToken()` at boot and records the real outcome in
+   an exported `appCheckState`; **Admin → General → System** shows it as one line:
+   *token OK — safe to enforce* / *NO TOKEN — do not enforce (reason)* / *NO KEY IN
+   THIS BUILD*. "Token OK" means Google issued a token **and** Firebase exchanged it,
+   which is the whole chain — so this line separates the three causes above instead
+   of guessing. Read it before ever switching enforcement on again.
+
+   While enforced, this was confirmed working: every unauthenticated REST request to the database was
    refused — including `authIndex` and `appAccess/lockdown`, which the rules
    deliberately leave open, because App Check rejects a tokenless request before the
-   rules are consulted — while the real app logs in normally.
+   rules are consulted. Real logins broke at the same time, which is the bug above.
 
    Note: once enforced, Firestore refuses plain REST calls that carry only an API key.
    That is the point, but it also ends the console-free database checks used
