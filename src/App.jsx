@@ -1234,7 +1234,16 @@ async function loginWithCredentials(username, password, deviceId, opts = {}) {
       // Establish the Firebase Auth session (lazy provisioning) BEFORE the
       // session writes below, which hardened rules gate on it. The profile is
       // read post-claim inside writeIdentityDocs — no pre-auth accounts read.
-      scheme = await ensureFirebaseIdentity(accountId, uname, version, password, scheme)
+      const identity = await ensureFirebaseIdentity(accountId, uname, version, password, scheme)
+      scheme = identity.scheme
+      // No session means everything below is doomed — the profile read on the next
+      // line needs request.auth, and without it returns a bare permission-denied
+      // that points at the rules rather than at the cause. Stop here and say why.
+      if (identity.code) {
+        return { ok: false, message: identity.code === 'auth/operation-not-allowed'
+          ? 'Sign-in is not switched on for this app yet. An admin needs to enable Email/Password sign-in in the Firebase console.'
+          : `Could not start a secure session (${identity.code}). Tell an admin.` }
+      }
     }
 
     // Read the profile now that a session exists (permitted under locked rules).
@@ -1301,18 +1310,24 @@ async function loginWithCredentials(username, password, deviceId, opts = {}) {
     // sentence — App Check refusing a tokenless request, a rules denial, and a dead
     // network all read identically, and the fix for each is somewhere different.
     //
-    // App Check is called out by name because it is the one nobody guesses: the login
-    // bootstrap reads authIndex BEFORE any Firebase Auth session exists, so with App
-    // Check enforced that read is refused unless reCAPTCHA has already produced a
-    // token — and if reCAPTCHA itself is blocked (an ad blocker, a strict network),
-    // it never will.
+    // Both likely causes are named, commonest first. A denial here is almost always
+    // "no Auth session was created" — every hardened rule below the sign-in gates on
+    // request.auth. App Check is the other one, and the one nobody guesses: the login
+    // bootstrap reads authIndex BEFORE any session exists, so with App Check enforced
+    // that read is refused unless reCAPTCHA has already produced a token — and if
+    // reCAPTCHA is blocked (an ad blocker, a strict network), it never will.
+    //
+    // Order matters. This message used to lead with App Check, and did so while the
+    // real fault was a disabled Email/Password provider — which sent a day of
+    // debugging at reCAPTCHA keys and enforcement toggles before anyone looked at
+    // the sign-in method.
     console.error('VManifest 92 login error:', e)
     const code = (e && e.code) || ''
     const denied = code === 'permission-denied' || code === 'unauthenticated'
     return {
       ok: false,
       message: denied
-        ? `Sign-in refused (${code}). If App Check is enforced, this device may not be getting a reCAPTCHA token — an ad blocker or a strict network will do that.`
+        ? `Sign-in refused (${code}). Usually no sign-in session was created — check Email/Password is enabled in Firebase → Authentication → Sign-in method. Otherwise App Check may be enforced while this device isn't getting a reCAPTCHA token.`
         : `Could not reach the database${code ? ` (${code})` : ''}. Check your Firebase setup.`,
     }
   }
@@ -1748,10 +1763,17 @@ async function writeAuthIndex(uname, accountId, patch) {
 }
 
 // Sign the user into Firebase Auth (creating the auth user on first login), then
-// link the account and write its users/{uid} role/group mapping. Every call is
-// wrapped so a failure here can never break the legacy login flow. Called only
-// on the not-yet-migrated login path; the profile is read post-claim inside
+// link the account and write its users/{uid} role/group mapping. Called only on
+// the not-yet-migrated login path; the profile is read post-claim inside
 // writeIdentityDocs, so no pre-auth accounts read is needed.
+//
+// Returns { scheme, code }. A non-null code means NO Auth session was established,
+// which is fatal, not best-effort: every hardened rule below this point gates on
+// request.auth, so the caller must stop rather than walk into a read it cannot
+// make. This used to swallow the failure and return the scheme regardless — with
+// Email/Password sign-in disabled in the console, that turned a one-line
+// misconfiguration into a bare permission-denied that read as a rules bug and
+// went unnoticed from 7 to 22 Sep.
 // `scheme` is the account's STORED authEmailScheme, and the auth user must be
 // created at the address that scheme implies — the claim rule matches the token's
 // email against stored state, so provisioning at any other address is denied.
@@ -1785,19 +1807,17 @@ async function ensureFirebaseIdentity(accountId, uname, version, password, schem
         // version number pre-register that exact synthetic email and win the
         // claim before the real owner ever does. An admin password reset
         // (setAccountPassword) bumps the version through an authorized write.
-        return scheme
+        return { scheme, code: (e2 && e2.code) || 'auth/unknown' }
       }
     }
-    if (!uid) return scheme
+    if (!uid) return { scheme, code: 'auth/no-session' }
     await writeIdentityDocs(accountId, uid, version, uname)
     // The claim above is what makes the account self-writable, so the flip off
     // the legacy address can only happen after it. No-op for an account already
     // born on the new scheme.
-    return await reconcileAuthEmailScheme(accountId, uname, version, scheme, scheme)
+    return { scheme: await reconcileAuthEmailScheme(accountId, uname, version, scheme, scheme), code: null }
   } catch (e) {
-    // Best-effort by design: the caller's legacy login already succeeded, and
-    // this is a no-op until the Email/Password provider is enabled.
-    return scheme
+    return { scheme, code: (e && e.code) || 'auth/unknown' }
   }
 }
 

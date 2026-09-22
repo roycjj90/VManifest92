@@ -24,13 +24,16 @@ Minimise Firestore reads in every design *and* while testing.
 ## Status: all six phases complete
 
 Built, tested and live at `v-manifest92.vercel.app`, on the free tier throughout.
-`src/App.jsx` 17,054 → ~8,400 lines. Hardened rules published. App Check is set up but
-**currently OFF** — see item 5 below.
+`src/App.jsx` 17,054 → ~8,400 lines. Hardened rules published (for real this time).
+App Check **enforced on Firestore** and verified from outside the app.
 
 **Still open before real personnel go in:**
 
 1. **Change the seeded `admin` password** from `123`. The single biggest remaining
-   item — bigger than App Check was, because the dev quick-login buttons are staying.
+   item — bigger than App Check was, because the dev quick-login buttons are staying,
+   and because a real Firebase Auth user now exists at
+   `acc_yxokwqz91wh9gbdrp3in@vmanifest92.local` holding the password derived from it.
+   Changing it in the app updates Firebase Auth too.
 2. **Keep Lockdown Mode on** until the app is actually announced.
 3. ~~**Confirm the Console rules match `firestore.rules`.**~~ **Resolved 2026-09-22.**
    The anomaly was real: `firestore.rules` had **never actually been published** to the
@@ -40,10 +43,10 @@ Built, tested and live at `v-manifest92.vercel.app`, on the free tier throughout
 4. **Import the real 500** via Admin → Import Personnel, then **Admin → Rebuild
    Rosters** if anything looks wrong. 250 fake people for a dry run are in
    `test/sample-250.tsv` — paste that into the same screen.
-5. **App Check is unenforced.** Enforcing it blocks login, and the console reports
-   **0 verified requests** even though the site key is in the deployed build. The app
-   works fine with it off; it is a locked door that is currently unlocked, not a
-   broken app. See the App Check section below for the open diagnosis.
+5. **Confirm App Check enforcement on Firebase Authentication.** Firestore is
+   enforced and proven (see below). The Auth row was switched on at the same time but
+   a tokenless sign-in from outside the app was still being evaluated normally
+   minutes later — either it did not save or it had not propagated. Re-check it.
 
 ---
 
@@ -366,10 +369,12 @@ because it is one company. 5 companies need many.
    the Firebase console, site key into Vercel as `VITE_RECAPTCHA_SITE_KEY`, redeploy,
    enforce.
 
-   **The problem.** With enforcement ON, login fails and the console shows **0
-   verified requests** — meaning Firebase has never once accepted a token from this
-   app. The site key IS in the deployed build (ends `bhnU2n`). Three things can cause
-   this, and nothing on screen said which:
+   **RESOLVED 2026-09-22.** Enforced on Cloud Firestore and verified independently:
+   a request with no App Check token now gets `403` on `authIndex/{uname}`, a document
+   the rules deliberately make world-readable. Two separate faults had to be fixed, and
+   a third turned out to be masking both.
+
+   **What actually went wrong** (the console's "0 verified requests" said none of it):
    - Firebase App Check is registered with reCAPTCHA **Enterprise** while the app
      sends a reCAPTCHA **v3** token. **This was it** (confirmed 2026-09-22).
      `src/firebase.js` now uses `ReCaptchaEnterpriseProvider`, and
@@ -377,9 +382,29 @@ because it is one company. 5 companies need many.
      Security → reCAPTCHA — not a key from `google.com/recaptcha/admin`. The two kinds
      of key look identical and are not interchangeable, which is what made this hard to
      see: nothing anywhere says "wrong kind of key", only 0 verified requests.
-   - The **secret key** pasted into Firebase does not match the site key in the build.
-   - The reCAPTCHA key's **domain list** does not include `v-manifest92.vercel.app`,
-     so Google never issues a token in the first place.
+   - The **wrong site key** was in Vercel — a classic v3 key from
+     `google.com/recaptcha/admin`, not the Enterprise key ID from Google Cloud. Also
+     fixed 2026-09-22.
+
+   **The third fault, and the lesson.** While chasing the above, publishing
+   `firestore.rules` for the first time revealed that logging in as `admin` had been
+   broken since 7 Sep: **Email/Password sign-in was never enabled** in Firebase Auth,
+   so no session could be created, and `ensureFirebaseIdentity` swallowed that as
+   "best effort". Under the unpublished (permissive) rules the app read the profile
+   anyway and nobody noticed. Under real rules it failed with a bare
+   `permission-denied` — which read as a rules bug and sent a day of debugging at
+   reCAPTCHA keys instead.
+
+   Three lessons, all cheap to act on and expensive to relearn:
+   - **A swallowed error on a path everything else depends on is not "best effort".**
+     No Auth session means every hardened rule below refuses; the code now stops and
+     names the cause.
+   - **A diagnostic that overclaims is worse than none.** The first version of the
+     Admin card said "sending tokens" whenever a key was present — a weaker claim than
+     it read as. It now reports what `getToken()` actually returned.
+   - **Verify enforcement from outside the app.** The console said enforced; only a
+     tokenless request from elsewhere proved which APIs it really covered — and showed
+     that Firestore was enforced while Authentication was not.
 
    **The check added for this (uncommitted, needs a deploy to be useful).**
    `src/firebase.js` now calls `getToken()` at boot and records the real outcome in
