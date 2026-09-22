@@ -32,10 +32,11 @@ Built, tested and live at `v-manifest92.vercel.app`, on the free tier throughout
 1. **Change the seeded `admin` password** from `123`. The single biggest remaining
    item — bigger than App Check was, because the dev quick-login buttons are staying.
 2. **Keep Lockdown Mode on** until the app is actually announced.
-3. **Confirm the Console rules match `firestore.rules`.** On 2026-09-21, minutes before
-   App Check enforcement took effect, an unauthenticated read of `companies` succeeded
-   while `accounts` was correctly refused — which the repo's rules would not allow. Low
-   severity (company names), but it means the two can drift.
+3. ~~**Confirm the Console rules match `firestore.rules`.**~~ **Resolved 2026-09-22.**
+   The anomaly was real: `firestore.rules` had **never actually been published** to the
+   console, which is why an unauthenticated read of `companies` succeeded on 2026-09-21.
+   Now published. Re-check after any change to this file — the two can drift silently,
+   and nothing in the app warns you.
 4. **Import the real 500** via Admin → Import Personnel, then **Admin → Rebuild
    Rosters** if anything looks wrong. 250 fake people for a dry run are in
    `test/sample-250.tsv` — paste that into the same screen.
@@ -370,8 +371,12 @@ because it is one company. 5 companies need many.
    app. The site key IS in the deployed build (ends `bhnU2n`). Three things can cause
    this, and nothing on screen said which:
    - Firebase App Check is registered with reCAPTCHA **Enterprise** while the app
-     sends a reCAPTCHA **v3** token. Switching the code to the Enterprise provider
-     would likely need a billing account, which breaks the zero-cost rule.
+     sends a reCAPTCHA **v3** token. **This was it** (confirmed 2026-09-22).
+     `src/firebase.js` now uses `ReCaptchaEnterpriseProvider`, and
+     `VITE_RECAPTCHA_SITE_KEY` must hold an **Enterprise** key made in Google Cloud →
+     Security → reCAPTCHA — not a key from `google.com/recaptcha/admin`. The two kinds
+     of key look identical and are not interchangeable, which is what made this hard to
+     see: nothing anywhere says "wrong kind of key", only 0 verified requests.
    - The **secret key** pasted into Firebase does not match the site key in the build.
    - The reCAPTCHA key's **domain list** does not include `v-manifest92.vercel.app`,
      so Google never issues a token in the first place.

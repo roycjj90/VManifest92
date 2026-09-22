@@ -1,7 +1,7 @@
 import { initializeApp } from 'firebase/app'
 import { getFirestore } from 'firebase/firestore'
 import { getAuth } from 'firebase/auth'
-import { initializeAppCheck, ReCaptchaV3Provider, getToken } from 'firebase/app-check'
+import { initializeAppCheck, ReCaptchaEnterpriseProvider, getToken } from 'firebase/app-check'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -45,7 +45,12 @@ if (RECAPTCHA_SITE_KEY) {
   if (debugToken) self.FIREBASE_APPCHECK_DEBUG_TOKEN = debugToken
   try {
     const ac = initializeAppCheck(app, {
-      provider: new ReCaptchaV3Provider(RECAPTCHA_SITE_KEY),
+      // ENTERPRISE, not v3. The Firebase console registered this web app under
+      // reCAPTCHA Enterprise, and a v3 token sent to an Enterprise registration is
+      // rejected every time — which is exactly what "0 verified requests" meant.
+      // VITE_RECAPTCHA_SITE_KEY must therefore hold an ENTERPRISE site key (made in
+      // Google Cloud → Security → reCAPTCHA), not a key from google.com/recaptcha/admin.
+      provider: new ReCaptchaEnterpriseProvider(RECAPTCHA_SITE_KEY),
       isTokenAutoRefreshEnabled: true,
     })
     // Ask for a token straight away and record the outcome. This is the check that
