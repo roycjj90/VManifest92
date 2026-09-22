@@ -43,10 +43,27 @@ App Check **enforced on Firestore** and verified from outside the app.
 4. **Import the real 500** via Admin → Import Personnel, then **Admin → Rebuild
    Rosters** if anything looks wrong. 250 fake people for a dry run are in
    `test/sample-250.tsv` — paste that into the same screen.
-5. **Confirm App Check enforcement on Firebase Authentication.** Firestore is
-   enforced and proven (see below). The Auth row was switched on at the same time but
-   a tokenless sign-in from outside the app was still being evaluated normally
-   minutes later — either it did not save or it had not propagated. Re-check it.
+5. **App Check does NOT appear to block account CREATION.** Verified from outside the
+   app on 2026-09-22, minutes after Auth enforcement went live:
+   - Firestore read, no token → `403` ✅
+   - `accounts:signInWithPassword`, no token → *"Firebase App Check token is
+     invalid"* ✅
+   - `accounts:signUp`, no token → **the account was created** ❌
+
+   That last one matters, because it is the endpoint the documented squatting risk
+   depends on: synthetic-email registration is first-come-first-served, so an account
+   that has NEVER logged in can be claimed by anyone holding the public bundle config.
+   App Check was the mitigation assumed to close it. On this evidence it does not.
+
+   Could still be per-endpoint propagation lag — re-test before trusting either
+   answer. If signUp stays open, the pre-launch item below is not optional: either
+   confirm every account has logged in at least once, or move the `authUid` claim path
+   in `firestore.rules` to admin-only.
+
+   Cleanup owed: the probe created a junk Auth user
+   `probe_appcheck_test@vmanifest92.local`. Delete it in Firebase → Authentication →
+   Users. It owns no account document and can claim nothing, but it should not be
+   sitting there.
 
 ---
 
