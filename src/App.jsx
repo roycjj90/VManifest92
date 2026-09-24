@@ -8228,6 +8228,12 @@ function AdminView({
                       setImportBusy(false)
                     }}>{importBusy ? 'Importing…' : 'Import'}</button>
                 </div>
+                {/* The Import button being faded is the gate working, but nothing said
+                    so — the first admin to meet it tapped it repeatedly and concluded
+                    the app was broken. Only shown while it IS the blocker. */}
+                {!importPreview && importText.trim() && !importBusy && (
+                  <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 8 }}>Tap Check first — Import stays off until the list is checked.</p>
+                )}
                 {importMsg && <p style={{ fontSize: 12, marginTop: 8, color: importMsg.startsWith('Imported') ? 'var(--blue)' : 'var(--red)' }}>{importMsg}</p>}
               </PopupCard>
               <div style={{ height: 1, background: 'var(--separator)', margin: '0 16px' }} />

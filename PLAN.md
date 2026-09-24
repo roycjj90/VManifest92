@@ -41,8 +41,7 @@ App Check **enforced on Firestore** and verified from outside the app.
    Now published. Re-check after any change to this file — the two can drift silently,
    and nothing in the app warns you.
 4. **Import the real 500** via Admin → Import Personnel, then **Admin → Rebuild
-   Rosters** if anything looks wrong. 250 fake people for a dry run are in
-   `test/sample-250.tsv` — paste that into the same screen.
+   Rosters** if anything looks wrong. (Dry run with 250 fake people done 2026-09-24.)
 5. **App Check does NOT appear to block account CREATION.** Verified from outside the
    app on 2026-09-22, minutes after Auth enforcement went live:
    - Firestore read, no token → `403` ✅
